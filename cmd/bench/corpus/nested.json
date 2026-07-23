@@ -1,0 +1,17 @@
+{
+  "org": {
+    "id": "org_1",
+    "name": "Acme",
+    "teams": [
+      {"id": "team_1", "name": "Platform", "members": [
+        {"id": "u1", "name": "Alice", "roles": ["admin", "oncall"], "prefs": {"theme": {"mode": "dark", "accent": {"hue": 210, "sat": {"pct": 80, "raw": {"deep": {"deeper": {"deepest": "value"}}}}}}}},
+        {"id": "u2", "name": "Bob", "roles": ["dev"], "prefs": {"theme": {"mode": "light", "accent": {"hue": 20, "sat": {"pct": 60, "raw": {"deep": {"deeper": {"deepest": "value"}}}}}}}}
+      ]},
+      {"id": "team_2", "name": "Growth", "members": [
+        {"id": "u3", "name": "Carol", "roles": ["dev", "lead"], "prefs": {"theme": {"mode": "dark", "accent": {"hue": 320, "sat": {"pct": 90, "raw": {"deep": {"deeper": {"deepest": "value"}}}}}}}},
+        {"id": "u4", "name": "Dan", "roles": ["analyst"], "prefs": {"theme": {"mode": "light", "accent": {"hue": 140, "sat": {"pct": 40, "raw": {"deep": {"deeper": {"deepest": "value"}}}}}}}}
+      ]}
+    ],
+    "tags": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t"]
+  }
+}

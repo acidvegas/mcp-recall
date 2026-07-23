@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "messages": [
+    {"type": "message", "user": "U01ACID", "ts": "1717243811.001", "text": "Shipping the benchmark tool today — it measures real byte and token savings per handler and verifies losslessness on every fixture."},
+    {"type": "message", "user": "U02MNT", "ts": "1717243700.002", "text": "Nice. Can we get a colored TUI so we can screenshot it for the README? Green for big wins, red for anything that expands or fails round-trip."},
+    {"type": "message", "user": "U01ACID", "ts": "1717243650.003", "text": "That's the plan. Bubble Tea live view plus a static report mode for CI."},
+    {"type": "message", "user": "U03QA", "ts": "1717243600.004", "text": "Make sure the secret fixture actually gets blocked and never stored, that's the one that would embarrass us."},
+    {"type": "message", "user": "U01ACID", "ts": "1717243550.005", "text": "Already asserting it — a detected secret must fail the run if it ever stores."},
+    {"type": "message", "user": "U02MNT", "ts": "1717243500.006", "text": "What tokenizer are we using? Claude's isn't public."},
+    {"type": "message", "user": "U01ACID", "ts": "1717243450.007", "text": "tiktoken o200k as an offline proxy, clearly labeled as an estimate. Bytes stay exact."},
+    {"type": "message", "user": "U03QA", "ts": "1717243400.008", "text": "Works for me. Ratios are what matter for relative comparison anyway."},
+    {"type": "message", "user": "U04PM", "ts": "1717243350.009", "text": "Can the report show net savings at a few retrieval rates? Execs will ask about the payback."},
+    {"type": "message", "user": "U01ACID", "ts": "1717243300.010", "text": "Yep — gross plus modeled net at 10/25/50 percent retrieval."}
+  ],
+  "has_more": true
+}

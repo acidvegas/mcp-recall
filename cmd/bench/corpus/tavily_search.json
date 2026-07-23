@@ -1,0 +1,11 @@
+{
+  "query": "sqlite fts5 vs vector search for local retrieval",
+  "results": [
+    {"title": "FTS5 Extension - SQLite Documentation", "url": "https://www.sqlite.org/fts5.html", "content": "FTS5 is an SQLite virtual table module that provides full-text search functionality. It supports the BM25 ranking function, prefix queries, phrase queries, and the NEAR operator. Content can be stored externally or contentlessly. The snippet() and highlight() auxiliary functions extract matching excerpts from documents.", "score": 0.97},
+    {"title": "sqlite-vec: vector search as an SQLite extension", "url": "https://github.com/asg017/sqlite-vec", "content": "sqlite-vec is a small, dependency-free SQLite extension for vector search written in C. It stores float, int8, and binary vectors and supports brute-force KNN with cosine and L2 distance. Suitable for small to medium corpora where an approximate index is unnecessary.", "score": 0.94},
+    {"title": "Hybrid search: combining BM25 and embeddings", "url": "https://example.com/hybrid-search", "content": "Hybrid retrieval fuses lexical (BM25) and semantic (vector) rankings, typically with reciprocal rank fusion. Lexical search excels at exact terms and identifiers; vector search catches paraphrase and synonymy. RRF is robust because it needs no score normalization between the two systems.", "score": 0.91},
+    {"title": "Reciprocal Rank Fusion explained", "url": "https://example.com/rrf", "content": "RRF assigns each document a score of sum(1/(k+rank)) across result lists, with k commonly set to 60. It consistently outperforms individual rankers and simple score combination in TREC evaluations.", "score": 0.88},
+    {"title": "Local embeddings with Ollama", "url": "https://ollama.com/blog/embeddings", "content": "Ollama can serve embedding models like nomic-embed-text and all-minilm locally over an HTTP endpoint. This keeps vector generation on-device with no hosted API, at the cost of running a separate process and downloading the model weights once.", "score": 0.85}
+  ],
+  "response_time": 1.42
+}

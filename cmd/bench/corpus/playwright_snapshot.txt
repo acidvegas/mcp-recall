@@ -1,0 +1,52 @@
+- document "Dashboard — Acme Analytics"
+  - banner
+    - link "Acme Analytics" [ref=s1e2]
+    - navigation "Primary"
+      - list
+        - listitem: link "Overview" [ref=s1e5]
+        - listitem: link "Reports" [ref=s1e6]
+        - listitem: link "Segments" [ref=s1e7]
+        - listitem: link "Settings" [ref=s1e8]
+    - button "Notifications" [ref=s1e9]
+    - button "Account menu" [ref=s1e10]
+  - main
+    - heading "Overview" [level=1] [ref=s1e12]
+    - region "Key metrics"
+      - group "Active users"
+        - text "Active users"
+        - text "48,213"
+        - text "+12.4% vs last week"
+      - group "Sessions"
+        - text "Sessions"
+        - text "192,004"
+        - text "+3.1% vs last week"
+      - group "Bounce rate"
+        - text "Bounce rate"
+        - text "38.2%"
+        - text "-1.8% vs last week"
+      - group "Avg. session"
+        - text "Avg. session"
+        - text "4m 22s"
+        - text "+0.3% vs last week"
+    - region "Traffic by source"
+      - table
+        - rowgroup
+          - row: columnheader "Source"; columnheader "Users"; columnheader "Share"
+        - rowgroup
+          - row: cell "Organic search"; cell "21,004"; cell "43.6%"
+          - row: cell "Direct"; cell "11,882"; cell "24.6%"
+          - row: cell "Referral"; cell "7,431"; cell "15.4%"
+          - row: cell "Social"; cell "4,902"; cell "10.2%"
+          - row: cell "Email"; cell "2,994"; cell "6.2%"
+    - region "Recent events"
+      - list
+        - listitem: text "10:42 — Deploy v3.2.1 to production succeeded"
+        - listitem: text "10:18 — Alert resolved: billing-worker latency"
+        - listitem: text "09:55 — New segment 'Enterprise trials' created"
+        - listitem: text "09:31 — Export completed: 48,213 rows"
+        - listitem: text "09:02 — User invited: analyst@acme.com"
+    - button "Load more" [ref=s1e60]
+  - contentinfo
+    - text "© 2026 Acme Analytics"
+    - link "Privacy" [ref=s1e63]
+    - link "Terms" [ref=s1e64]

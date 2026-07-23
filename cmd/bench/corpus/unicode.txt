@@ -1,0 +1,19 @@
+翻訳結果 — Translation output (multibyte stress fixture)
+
+日本語: このツールは、大きなツール出力を要約し、完全な内容をローカルの
+SQLite データベースに保存します。要約と recall ID だけがモデルに返され、
+必要なときに完全な内容を取り出せます。これによりコンテキストウィンドウを
+小さく保ちながら、情報を失うことはありません。
+
+Español: Esta herramienta comprime salidas de herramientas grandes en un
+resumen y almacena el contenido completo en una base de datos SQLite local.
+
+Русский: Этот инструмент сжимает большие выходные данные инструментов в
+краткое изложение и сохраняет полное содержимое в локальной базе данных.
+
+中文: 该工具将大型工具输出压缩为摘要，并将完整内容存储在本地 SQLite
+数据库中。只有摘要和 recall ID 会返回给模型。
+
+Emoji check: 🚀 ✅ 🔒 📉 🧠 — multibyte runes must chunk on character
+boundaries, never split mid-rune. ERROR: this line is here to exercise the
+structure-aware line-mode matcher on multibyte content as well.

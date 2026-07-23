@@ -1,0 +1,42 @@
+$ npm install
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory. Do not use it.
+npm warn deprecated rimraf@3.0.2: Rimraf versions prior to v4 are no longer supported.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported.
+npm warn deprecated @humanwhocodes/config-array@0.13.0: Use @eslint/config-array instead.
+
+added 1204 packages, and audited 1205 packages in 42s
+
+218 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities
+
+$ npm run build
+
+> mcp-recall@1.9.0 build
+> tsc && bun build ./src/cli.ts --outdir dist --target node
+
+src/cli.ts:44:7 - warning TS6133: 'unused' is declared but its value is never read.
+Bundled 88 modules in 310ms
+  cli.js  221.40 KB
+  server.js  187.02 KB
+
+$ npm test
+
+> mcp-recall@1.9.0 test
+> bun test
+
+bun test v1.3.14
+tests/db.test.ts:
+  ✓ storeOutput > returns a stored output with generated id [2.11ms]
+  ✓ storeOutput > computes summary_size from summary bytes [0.98ms]
+  ✓ searchOutputs > finds items matching query in summary [3.42ms]
+  ✓ evictIfNeeded > decay keeps a recently-accessed item over an older one [1.77ms]
+tests/hooks.test.ts:
+  ✓ HandlePostToolUse > compresses and stores a large output [5.03ms]
+  ✓ HandlePostToolUse > skips when a secret is detected [1.20ms]
+
+ 312 pass
+ 0 fail
+ 891 expect() calls
+Ran 312 tests across 21 files. [4.82s]

@@ -1,0 +1,14 @@
+{
+  "status": "ok",
+  "generated_at": "2026-06-01T12:00:00Z",
+  "pagination": {"page": 1, "per_page": 20, "total_pages": 8, "total_items": 154},
+  "meta": {"request_id": "req_a1b2c3d4", "region": "us-east-1", "cache": "miss", "duration_ms": 84},
+  "data": [
+    {"id": "node_001", "type": "service", "name": "auth-gateway", "health": "green", "replicas": 4, "cpu": 0.42, "mem_mb": 512, "version": "3.2.1", "endpoints": ["/login", "/logout", "/refresh"], "dependencies": ["postgres", "redis"]},
+    {"id": "node_002", "type": "service", "name": "billing-worker", "health": "yellow", "replicas": 2, "cpu": 0.78, "mem_mb": 1024, "version": "2.9.0", "endpoints": ["/charge", "/refund"], "dependencies": ["postgres", "stripe"]},
+    {"id": "node_003", "type": "service", "name": "search-indexer", "health": "green", "replicas": 3, "cpu": 0.35, "mem_mb": 768, "version": "1.4.7", "endpoints": ["/index", "/query"], "dependencies": ["elasticsearch"]},
+    {"id": "node_004", "type": "service", "name": "notification-fanout", "health": "red", "replicas": 0, "cpu": 0.0, "mem_mb": 0, "version": "0.8.2", "endpoints": ["/send"], "dependencies": ["redis", "sns"]},
+    {"id": "node_005", "type": "service", "name": "media-transcoder", "health": "green", "replicas": 6, "cpu": 0.91, "mem_mb": 2048, "version": "4.0.0", "endpoints": ["/transcode"], "dependencies": ["s3", "ffmpeg"]},
+    {"id": "node_006", "type": "service", "name": "webhook-dispatcher", "health": "yellow", "replicas": 2, "cpu": 0.55, "mem_mb": 384, "version": "1.1.3", "endpoints": ["/dispatch", "/retry"], "dependencies": ["postgres", "rabbitmq"]}
+  ]
+}

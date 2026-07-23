@@ -1,0 +1,382 @@
+// mcprecall-go - Developed by acidvegas in Go (https://github.com/acidvegas)
+// internal/hooks/hooks_test.go
+
+package hooks
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	"mcprecall/internal/config"
+	"mcprecall/internal/db"
+	"mcprecall/internal/projectkey"
+)
+
+const sessionID = "test-session-abc123"
+
+// hookEnv sets up a temp-file DB (so state persists across hook calls, unlike
+// a fresh :memory: per Open) and returns the cwd + resolved project key.
+func hookEnv(t *testing.T) (cwd, pk string) {
+	t.Helper()
+	dir := t.TempDir()
+	cwd = t.TempDir() // non-git dir → project key is a stable hash of the path
+	os.Setenv("RECALL_DB_PATH", filepath.Join(dir, "h.db"))
+	os.Setenv("RECALL_CONFIG_PATH", filepath.Join(dir, "nope.toml"))
+	config.Reset()
+	t.Cleanup(func() {
+		os.Unsetenv("RECALL_DB_PATH")
+		os.Unsetenv("RECALL_CONFIG_PATH")
+		config.Reset()
+	})
+	return cwd, projectkey.Key(cwd)
+}
+
+func ptu(toolName string, text string, extra map[string]any) string {
+	p := map[string]any{
+		"session_id":    sessionID,
+		"cwd":           currentCWD,
+		"tool_name":     toolName,
+		"tool_input":    map[string]any{},
+		"tool_response": map[string]any{"content": []any{map[string]any{"type": "text", "text": text}}},
+	}
+	for k, v := range extra {
+		p[k] = v
+	}
+	b, _ := json.Marshal(p)
+	return string(b)
+}
+
+func sessionStart(extra map[string]any) string {
+	p := map[string]any{"session_id": sessionID, "cwd": currentCWD, "hook_event_name": "SessionStart"}
+	for k, v := range extra {
+		p[k] = v
+	}
+	b, _ := json.Marshal(p)
+	return string(b)
+}
+
+var currentCWD string
+
+func captureStderr(fn func()) string {
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	fn()
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	return buf.String()
+}
+
+// largeGithub returns a compressible github list response.
+func largeGithub() string {
+	var issues []map[string]any
+	for i := 0; i < 5; i++ {
+		issues = append(issues, map[string]any{
+			"number": i + 1, "title": "Issue number " + itoa(i+1) + " with a descriptive title",
+			"state": "open", "html_url": "https://github.com/org/repo/issues/" + itoa(i+1),
+			"labels": []any{map[string]any{"name": "bug"}}, "body": strings.Repeat("x", 300),
+		})
+	}
+	b, _ := json.Marshal(issues)
+	return string(b)
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
+}
+
+func isEmpty(o HookOutput) bool { return o.UpdatedMCPToolOutput == "" && !o.SuppressOutput }
+
+// ── handleSessionStart ────────────────────────────────────────────────────────
+
+func TestSessionStartRecordsAndIdempotent(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	HandleSessionStart(sessionStart(nil))
+	HandleSessionStart(sessionStart(nil)) // idempotent
+	database, _ := db.Open(os.Getenv("RECALL_DB_PATH"))
+	defer database.Close()
+	days := db.GetSessionDays(database)
+	today := time.Now().UTC().Format("2006-01-02")
+	n := 0
+	for _, d := range days {
+		if d == today {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("today recorded %d times, want 1", n)
+	}
+}
+
+func TestSessionStartInjection(t *testing.T) {
+	var pk string
+	currentCWD, pk = hookEnv(t)
+	// empty store → no snapshot
+	if snap := HandleSessionStart(sessionStart(nil)); snap != "" {
+		t.Errorf("expected empty snapshot, got %q", snap)
+	}
+
+	// pinned item → snapshot contains its summary
+	database, _ := db.Open(os.Getenv("RECALL_DB_PATH"))
+	s, _ := db.StoreOutput(database, db.StoreInput{ProjectKey: pk, SessionID: "sess-inject-001",
+		ToolName: "mcp__github__list_issues", Summary: "pinned item summary for injection test",
+		FullContent: "full content here", OriginalSize: 100})
+	db.PinOutput(database, s.ID, pk, true)
+	database.Close()
+	if snap := HandleSessionStart(sessionStart(nil)); !strings.Contains(snap, "pinned item summary for injection test") {
+		t.Errorf("snapshot missing pinned summary: %q", snap)
+	}
+}
+
+func TestSessionStartTruncatesLarge(t *testing.T) {
+	var pk string
+	currentCWD, pk = hookEnv(t)
+	database, _ := db.Open(os.Getenv("RECALL_DB_PATH"))
+	for i := 0; i < 15; i++ {
+		s, _ := db.StoreOutput(database, db.StoreInput{ProjectKey: pk, SessionID: "sess-inject-002",
+			ToolName: "mcp__github__list_issues", Summary: "pinned item " + itoa(i) + " — " + strings.Repeat("x", 80),
+			FullContent: "full", OriginalSize: 100})
+		db.PinOutput(database, s.ID, pk, true)
+	}
+	database.Close()
+	snap := HandleSessionStart(sessionStart(nil))
+	if len([]rune(snap)) >= 2100 {
+		t.Errorf("snapshot not truncated: %d runes", len([]rune(snap)))
+	}
+	if !strings.Contains(snap, "truncated") {
+		t.Errorf("missing truncation note")
+	}
+}
+
+func TestSessionStartUnknownProject(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	database, _ := db.Open(os.Getenv("RECALL_DB_PATH"))
+	db.StoreOutput(database, db.StoreInput{ProjectKey: "completely-different-project-key",
+		SessionID: "sess-other", ToolName: "mcp__github__list_issues", Summary: "should not appear",
+		FullContent: "full", OriginalSize: 100})
+	database.Close()
+	if snap := HandleSessionStart(sessionStart(nil)); snap != "" {
+		t.Errorf("should not inject unknown project: %q", snap)
+	}
+}
+
+// ── handlePostToolUse ─────────────────────────────────────────────────────────
+
+func TestPostDeniedSecretsAndSmall(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	if !isEmpty(HandlePostToolUse(ptu("mcp__recall__search", "x", nil))) {
+		t.Error("recall tool should be denied → {}")
+	}
+	if !isEmpty(HandlePostToolUse(ptu("mcp__1password__item_lookup", "secret=abc", nil))) {
+		t.Error("1password should be denied → {}")
+	}
+	if !isEmpty(HandlePostToolUse(ptu("mcp__github__get_file_contents", "-----BEGIN RSA PRIVATE KEY-----\nMIIE...", nil))) {
+		t.Error("secret content → {}")
+	}
+	if !isEmpty(HandlePostToolUse(ptu("mcp__github__list_issues", "tiny", nil))) {
+		t.Error("too-small output → {}")
+	}
+}
+
+var recallHeaderRe = regexp.MustCompile(`^\[recall:recall_[0-9a-f]{16}`)
+var sizeReductionRe = regexp.MustCompile(`→\d+(\.\d+)?(B|KB|MB)`)
+var hintRe = regexp.MustCompile(`· search: "[^"]+"`)
+
+func TestPostCompressesWithHeaderAndHints(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	r := HandlePostToolUse(ptu("mcp__github__list_issues", largeGithub(), nil))
+	if r.UpdatedMCPToolOutput == "" || !r.SuppressOutput {
+		t.Fatal("expected compressed output + suppressOutput")
+	}
+	if !recallHeaderRe.MatchString(r.UpdatedMCPToolOutput) {
+		t.Errorf("missing recall header: %q", r.UpdatedMCPToolOutput)
+	}
+	if !strings.Contains(r.UpdatedMCPToolOutput, "% reduction") || !sizeReductionRe.MatchString(r.UpdatedMCPToolOutput) {
+		t.Errorf("missing size/reduction: %q", r.UpdatedMCPToolOutput)
+	}
+	if !hintRe.MatchString(r.UpdatedMCPToolOutput) {
+		t.Errorf("missing hints: %q", r.UpdatedMCPToolOutput)
+	}
+}
+
+func TestPostOmitsHintsForStopwords(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	r := HandlePostToolUse(ptu("mcp__notes__dump", strings.Repeat("the\n", 4000), nil))
+	if r.UpdatedMCPToolOutput == "" {
+		t.Fatal("should compress")
+	}
+	if strings.Contains(r.UpdatedMCPToolOutput, "search:") {
+		t.Errorf("should omit hints for stopword-only content: %q", firstLine(r.UpdatedMCPToolOutput))
+	}
+}
+
+func TestPostStoresExtractedContent(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	HandlePostToolUse(ptu("mcp__github__list_issues", largeGithub(), nil))
+	database, _ := db.Open(os.Getenv("RECALL_DB_PATH"))
+	defer database.Close()
+	items := db.ExportAll(database, projectkey.Key(currentCWD))
+	if len(items) == 0 {
+		t.Fatal("nothing stored")
+	}
+	it := items[0]
+	if it.SessionID != sessionID {
+		t.Errorf("session_id = %q", it.SessionID)
+	}
+	// full_content is extracted text, not the MCP wrapper
+	if !strings.Contains(it.FullContent, `"number"`) || strings.Contains(it.FullContent, `"content":[{`) {
+		t.Errorf("full_content is the wrapper, not extracted text")
+	}
+}
+
+func TestPostDedupInputHash(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	in := ptu("mcp__github__list_issues", largeGithub(), map[string]any{"tool_input": map[string]any{"owner": "org", "repo": "repo"}})
+	first := HandlePostToolUse(in)
+	firstID := recallHeaderRe.FindString(first.UpdatedMCPToolOutput)
+	second := HandlePostToolUse(in)
+	if !strings.Contains(second.UpdatedMCPToolOutput, "· cached · ") || !second.SuppressOutput {
+		t.Errorf("second call should be cached: %q", firstLine(second.UpdatedMCPToolOutput))
+	}
+	if !strings.Contains(second.UpdatedMCPToolOutput, strings.TrimPrefix(firstID, "[")) {
+		t.Errorf("cached header should reuse original id")
+	}
+	database, _ := db.Open(os.Getenv("RECALL_DB_PATH"))
+	defer database.Close()
+	if got := db.ExportAll(database, projectkey.Key(currentCWD)); len(got) != 1 {
+		t.Errorf("cache hit should not store a 2nd item, got %d", len(got))
+	}
+}
+
+func TestPostDedupOutputHash(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	resp := largeGithub()
+	first := HandlePostToolUse(ptu("mcp__github__list_issues", resp, map[string]any{"tool_input": map[string]any{"page": 1}}))
+	if first.UpdatedMCPToolOutput == "" {
+		t.Fatal("first should store")
+	}
+	second := HandlePostToolUse(ptu("mcp__github__list_issues", resp, map[string]any{"tool_input": map[string]any{"page": 2}}))
+	if !strings.Contains(second.UpdatedMCPToolOutput, "· cached · ") {
+		t.Errorf("identical content, different input → content-hash cache: %q", firstLine(second.UpdatedMCPToolOutput))
+	}
+	database, _ := db.Open(os.Getenv("RECALL_DB_PATH"))
+	defer database.Close()
+	if got := db.ExportAll(database, projectkey.Key(currentCWD)); len(got) != 1 {
+		t.Errorf("output-dedup should reuse first item, got %d", len(got))
+	}
+}
+
+func TestPostEviction(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	currentCWD = cwd
+	dbPath := filepath.Join(dir, "h.db")
+	cfgPath := filepath.Join(dir, "config.toml")
+	os.WriteFile(cfgPath, []byte("[store]\nmax_size_mb = 0.003\n"), 0o644)
+	os.Setenv("RECALL_DB_PATH", dbPath)
+	os.Setenv("RECALL_CONFIG_PATH", cfgPath)
+	config.Reset()
+	defer func() {
+		os.Unsetenv("RECALL_DB_PATH")
+		os.Unsetenv("RECALL_CONFIG_PATH")
+		config.Reset()
+	}()
+
+	pk := projectkey.Key(cwd)
+	database, _ := db.Open(dbPath)
+	oldTs := time.Now().Unix() - 60
+	database.Exec(`INSERT INTO stored_outputs (id,project_key,session_id,tool_name,summary,full_content,original_size,summary_size,created_at) VALUES ('recall_evict0001',?,'session','mcp__old__tool','old','old content',2000,3,?)`, pk, oldTs)
+	database.Close()
+
+	HandlePostToolUse(ptu("mcp__github__list_issues", largeGithub(), nil))
+
+	database2, _ := db.Open(dbPath)
+	defer database2.Close()
+	if db.HasID(database2, "recall_evict0001") {
+		t.Error("old low-value item should have been evicted")
+	}
+}
+
+func TestPostMalformed(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	for _, in := range []string{"", "not json at all", `{"session_id":"x","cwd":"/tmp"`, "[]", `"just a string"`} {
+		if !isEmpty(HandlePostToolUse(in)) {
+			t.Errorf("malformed %q should return {}", in)
+		}
+	}
+	if !strings.Contains(captureStderr(func() { HandlePostToolUse("bad input") }), "invalid JSON") {
+		t.Error("missing invalid JSON log")
+	}
+	if !strings.Contains(captureStderr(func() { HandlePostToolUse("[]") }), "unexpected input shape") {
+		t.Error("missing shape error log")
+	}
+}
+
+func TestSessionStartMalformed(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	for _, in := range []string{"", "not json", `{"session_id":"x"`, "[]"} {
+		HandleSessionStart(in) // must not panic
+	}
+	if !strings.Contains(captureStderr(func() { HandleSessionStart("bad input") }), "invalid JSON") {
+		t.Error("missing invalid JSON log")
+	}
+	if !strings.Contains(captureStderr(func() { HandleSessionStart("[]") }), "unexpected input shape") {
+		t.Error("missing shape error log")
+	}
+}
+
+func TestPostDebugLogging(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	os.Setenv("RECALL_DEBUG", "1")
+	defer os.Unsetenv("RECALL_DEBUG")
+
+	deny := captureStderr(func() { HandlePostToolUse(ptu("mcp__1password__item_lookup", "x", nil)) })
+	if !strings.Contains(deny, "SKIP denylist") || !strings.Contains(deny, "mcp__1password__item_lookup") {
+		t.Errorf("denylist debug missing: %q", deny)
+	}
+	small := captureStderr(func() { HandlePostToolUse(ptu("mcp__github__list_issues", "tiny", nil)) })
+	if !strings.Contains(small, "SKIP no-compression") {
+		t.Errorf("no-compression debug missing")
+	}
+	stored := captureStderr(func() { HandlePostToolUse(ptu("mcp__github__list_issues", largeGithub(), nil)) })
+	if !strings.Contains(stored, "STORED") || !strings.Contains(stored, "reduction") {
+		t.Errorf("STORED debug missing: %q", stored)
+	}
+	if !strings.Contains(stored, "handler:") || !strings.Contains(stored, "githubHandler") {
+		t.Errorf("handler-name debug missing: %q", stored)
+	}
+	if !strings.Contains(stored, "intercepted mcp__github__list_issues") {
+		t.Errorf("intercepted debug missing")
+	}
+	// CACHE HIT (same input twice)
+	in := ptu("mcp__github__list_issues", largeGithub(), map[string]any{"tool_input": map[string]any{"o": "r"}})
+	HandlePostToolUse(in)
+	hit := captureStderr(func() { HandlePostToolUse(in) })
+	if !strings.Contains(hit, "CACHE HIT") {
+		t.Errorf("CACHE HIT debug missing: %q", hit)
+	}
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}

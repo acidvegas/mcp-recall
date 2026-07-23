@@ -1,0 +1,13 @@
+{
+  "issues": {
+    "nodes": [
+      {"identifier": "ENG-1201", "title": "Benchmark compression across all handlers", "state": {"name": "In Progress"}, "assignee": {"name": "acidvegas"}, "priority": 1, "estimate": 5, "createdAt": "2026-06-01T10:00:00Z", "description": "Build a TUI benchmark that measures byte and token savings per handler, verifies losslessness, and produces a screenshot-ready report for the README."},
+      {"identifier": "ENG-1198", "title": "Near-duplicate output collapse", "state": {"name": "Backlog"}, "assignee": null, "priority": 2, "estimate": 8, "createdAt": "2026-05-30T10:00:00Z", "description": "Collapse near-identical stored outputs (repeated file reads, paginated API calls) into one canonical item with a seen-count to cut storage and search noise."},
+      {"identifier": "ENG-1190", "title": "Profile feedback loop", "state": {"name": "Todo"}, "assignee": {"name": "maintainer"}, "priority": 3, "estimate": 13, "createdAt": "2026-05-25T10:00:00Z", "description": "Track which fields Claude actually retrieves and auto-suggest refinements to generated profiles so compression improves over time."},
+      {"identifier": "ENG-1185", "title": "Cross-project knowledge tier", "state": {"name": "Backlog"}, "assignee": null, "priority": 4, "estimate": 8, "createdAt": "2026-05-20T10:00:00Z", "description": "Optional global tier for notes and decisions searchable across repositories, turning recall from a per-repo cache into a personal knowledge base."},
+      {"identifier": "ENG-1180", "title": "Token-savings dashboard in recall__stats", "state": {"name": "Done"}, "assignee": {"name": "acidvegas"}, "priority": 2, "estimate": 3, "createdAt": "2026-05-15T10:00:00Z", "description": "Show estimated tokens saved alongside byte figures so users can see the context-window impact directly."},
+      {"identifier": "ENG-1176", "title": "Handle malformed JSON in profile strategies", "state": {"name": "Done"}, "assignee": {"name": "contributor7"}, "priority": 2, "estimate": 2, "createdAt": "2026-05-10T10:00:00Z", "description": "json_extract and json_truncate should fall back to a text excerpt when the payload fails to parse instead of returning empty."},
+      {"identifier": "ENG-1170", "title": "Unicode-safe chunking", "state": {"name": "Done"}, "assignee": {"name": "acidvegas"}, "priority": 3, "estimate": 3, "createdAt": "2026-05-05T10:00:00Z", "description": "Chunk on rune boundaries so multibyte content is never split mid-character."}
+    ]
+  }
+}

@@ -1,0 +1,51 @@
+package server
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"mcprecall/internal/db"
+	"mcprecall/internal/projectkey"
+	"mcprecall/internal/tools"
+)
+
+// Version is the current release version.
+const Version = "1.0.0"
+
+// Run starts the recall MCP server over stdio and blocks until the context is
+// cancelled or the transport closes. It registers every recall__ tool and wires
+// each to the pure functions in the tools package.
+func Run(ctx context.Context) error {
+	srv := mcp.NewServer(&mcp.Implementation{Name: "mcp-recall", Version: Version}, nil)
+
+	registerRetrieve(srv)
+	registerSearch(srv)
+	registerContext(srv)
+	registerListStored(srv)
+	registerNote(srv)
+	registerPin(srv)
+	registerForget(srv)
+	registerStats(srv)
+	registerSessionSummary(srv)
+	registerSuggest(srv)
+	registerExport(srv)
+
+	return srv.Run(ctx, &mcp.StdioTransport{})
+}
+
+func openDB(cwd string) (*db.DB, string, error) {
+	key := projectkey.Key(cwd)
+	database, err := db.Open(db.DefaultDBPath(key))
+	if err != nil {
+		return nil, "", fmt.Errorf("open db: %w", err)
+	}
+	return database, key, nil
+}
+
+// registerRetrieve wires recall__retrieve with its summary/peek/full modes.
+func registerRetrieve(srv *mcp.Server) {
+	// ... tool registration elided for brevity in this fixture ...
+	_ = tools.Retrieve
+}

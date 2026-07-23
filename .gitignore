@@ -1,20 +1,14 @@
-node_modules/
-dist/
-!plugins/mcp-recall/dist/
+# Compiled binaries
+/mcprecall
+/bench
+
+# Test / coverage artifacts
+*.out
+*.test
+coverage.txt
+
+# Local databases and editor cruft
 *.db
-*.db-shm
 *.db-wal
-.env
-bun.lockb
-
-# OS
+*.db-shm
 .DS_Store
-._*
-Thumbs.db
-
-# Editors
-.vscode/
-.idea/
-*.swp
-*.swo
-*~

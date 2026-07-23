@@ -1,0 +1,388 @@
+// mcprecall-go - Developed by acidvegas in Go (https://github.com/acidvegas)
+// internal/handlers/bash.go
+
+package handlers
+
+import (
+	"fmt"
+	"math"
+	"regexp"
+	"strings"
+
+	"mcprecall/internal/jsonx"
+)
+
+// ── terraform plan ────────────────────────────────────────────────────────────
+
+var (
+	terraformResourceRe    = regexp.MustCompile(`^\s+#\s+(.+?)\s+will\s+be\s+(created|destroyed|updated in-place|replaced)`)
+	terraformPlanSummaryRe = regexp.MustCompile(`(?m)^Plan:\s+.+$`)
+	terraformSymbol        = map[string]string{
+		"created":          "+",
+		"destroyed":        "-",
+		"updated in-place": "~",
+		"replaced":         "-/+",
+	}
+)
+
+func terraformPlanHandler(toolName string, output any) Result {
+	stdout := extractStdout(output)
+	originalSize := byteLen(ExtractText(output))
+
+	summaryLine := terraformPlanSummaryRe.FindString(stdout)
+
+	var resources []string
+	for _, line := range strings.Split(stdout, "\n") {
+		if m := terraformResourceRe.FindStringSubmatch(line); m != nil {
+			symbol, ok := terraformSymbol[m[2]]
+			if !ok {
+				symbol = "?"
+			}
+			resources = append(resources, fmt.Sprintf("  %s %s", symbol, m[1]))
+		}
+	}
+
+	if summaryLine == "" && len(resources) == 0 {
+		return shellHandler(toolName, output)
+	}
+
+	lines := []string{"terraform plan"}
+	if summaryLine != "" {
+		lines = append(lines, "  "+summaryLine)
+	}
+	n := len(resources)
+	if n > maxTerraformResource {
+		n = maxTerraformResource
+	}
+	lines = append(lines, resources[:n]...)
+	if len(resources) > maxTerraformResource {
+		lines = append(lines, fmt.Sprintf("  … (+%d more resources)", len(resources)-maxTerraformResource))
+	}
+	return Result{Summary: strings.Join(lines, "\n"), OriginalSize: originalSize}
+}
+
+// ── package installers ────────────────────────────────────────────────────────
+
+var (
+	pkgWarnRe = regexp.MustCompile(`(?i)^(npm warn|warn |warning )`)
+	pkgErrRe  = regexp.MustCompile(`(?i)^(npm error|error |err )`)
+	bunPkgRe  = regexp.MustCompile(`(?i)(\d+)\s+packages?\s+installed`)
+	npmPkgRe  = regexp.MustCompile(`(?i)added\s+(\d+)[^,\n]*`)
+	pipPkgRe  = regexp.MustCompile(`Successfully installed (.+)`)
+	yarnPkgRe = regexp.MustCompile(`(?i)success Saved (\d+) new dependenc`)
+)
+
+func packageInstallHandler(toolName string, output any) Result {
+	stdout := extractStdout(output)
+	stderr := extractStderr(output)
+	combined := strings.TrimSpace(stdout + "\n" + stderr)
+	originalSize := byteLen(ExtractText(output))
+
+	var warnings, errors []string
+	for _, line := range strings.Split(combined, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		if pkgWarnRe.MatchString(t) {
+			warnings = append(warnings, firstChars(t, 100))
+		} else if pkgErrRe.MatchString(t) {
+			errors = append(errors, firstChars(t, 100))
+		}
+	}
+
+	countLine, hasCount := "", false
+	if m := bunPkgRe.FindStringSubmatch(combined); m != nil {
+		countLine = m[1] + " packages installed"
+		hasCount = true
+	}
+	if !hasCount {
+		if m := npmPkgRe.FindString(combined); m != "" {
+			countLine = firstChars(strings.TrimSpace(m), 60)
+			hasCount = true
+		}
+	}
+	if !hasCount {
+		if m := pipPkgRe.FindStringSubmatch(combined); m != nil {
+			pkgs := strings.Fields(strings.TrimSpace(m[1]))
+			plural := "s"
+			if len(pkgs) == 1 {
+				plural = ""
+			}
+			countLine = fmt.Sprintf("pip: %d package%s installed", len(pkgs), plural)
+			hasCount = true
+		}
+	}
+	if !hasCount {
+		if m := yarnPkgRe.FindStringSubmatch(combined); m != nil {
+			countLine = "yarn: " + m[1] + " new dependencies saved"
+			hasCount = true
+		}
+	}
+
+	if !hasCount && len(errors) == 0 {
+		return shellHandler(toolName, output)
+	}
+
+	first := countLine
+	if !hasCount {
+		first = "package install"
+	}
+	lines := []string{first}
+	if len(warnings) > 0 {
+		plural := "s"
+		if len(warnings) == 1 {
+			plural = ""
+		}
+		detail := ""
+		if len(warnings) <= 3 {
+			detail = ": " + strings.Join(warnings, "; ")
+		}
+		lines = append(lines, fmt.Sprintf("  %d warning%s%s", len(warnings), plural, detail))
+	}
+	if len(errors) > 0 {
+		n := len(errors)
+		if n > 5 {
+			n = 5
+		}
+		for _, e := range errors[:n] {
+			lines = append(lines, "  error: "+e)
+		}
+	}
+	return Result{Summary: strings.Join(lines, "\n"), OriginalSize: originalSize}
+}
+
+// ── make / just build output ──────────────────────────────────────────────────
+
+var (
+	makeLineRe    = regexp.MustCompile(`^make(\[\d+\])?:\s`)
+	justErrRe     = regexp.MustCompile(`(?i)^(error:|justfile|warning:)\s`)
+	compilerErrRe = regexp.MustCompile(`(?i)^[^\s]+:\d+:\d*:?\s*(error|fatal error):`)
+	errorBracket  = regexp.MustCompile(`^error\[`)
+	caretOnlyRe   = regexp.MustCompile(`^\s*\^\s*$`)
+)
+
+func buildToolHandler(toolName string, output any) Result {
+	stdout := extractStdout(output)
+	stderr := extractStderr(output)
+	combined := strings.TrimSpace(stdout + "\n" + stderr)
+	originalSize := byteLen(ExtractText(output))
+
+	var errorLines, targetLines []string
+	for _, line := range strings.Split(combined, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		if makeLineRe.MatchString(t) {
+			if strings.Contains(t, "Error") || strings.Contains(t, "***") {
+				errorLines = append(errorLines, firstChars(t, 120))
+			} else if strings.Contains(t, "Leaving directory") || strings.Contains(t, "Entering directory") {
+				continue
+			} else {
+				targetLines = append(targetLines, firstChars(t, 80))
+			}
+			continue
+		}
+		if justErrRe.MatchString(t) {
+			errorLines = append(errorLines, firstChars(t, 120))
+			continue
+		}
+		if compilerErrRe.MatchString(t) || errorBracket.MatchString(t) || caretOnlyRe.MatchString(t) {
+			errorLines = append(errorLines, firstChars(t, 120))
+		}
+	}
+
+	if len(errorLines) == 0 && len(targetLines) == 0 {
+		return shellHandler(toolName, output)
+	}
+
+	status := ""
+	if obj, ok := output.(*jsonx.Obj); ok {
+		if ec, ok := objNum(obj, "exit_code"); ok {
+			if ec == 0 {
+				status = "✓"
+			} else {
+				status = "✗"
+			}
+		}
+	}
+
+	first := "build"
+	if status != "" {
+		first = status + " build"
+	}
+	lines := []string{first}
+	if len(errorLines) > 0 {
+		lines = append(lines, fmt.Sprintf("  errors (%d):", len(errorLines)))
+		n := len(errorLines)
+		if n > maxBuildErrors {
+			n = maxBuildErrors
+		}
+		for _, e := range errorLines[:n] {
+			lines = append(lines, "    "+e)
+		}
+		if len(errorLines) > maxBuildErrors {
+			lines = append(lines, fmt.Sprintf("    … (+%d more)", len(errorLines)-maxBuildErrors))
+		}
+	} else {
+		lines = append(lines, "  completed successfully")
+	}
+	return Result{Summary: strings.Join(lines, "\n"), OriginalSize: originalSize}
+}
+
+// ── gh CLI ────────────────────────────────────────────────────────────────────
+
+var (
+	ghListRe = regexp.MustCompile(`^#?\d+\t`)
+	ghPassRe = regexp.MustCompile(`(?i)\tpass\b`)
+	ghFailRe = regexp.MustCompile(`(?i)\tfail\b`)
+	ghKvRe   = regexp.MustCompile(`(?i)^(title|state|author|labels|number|assignees|milestone):\t`)
+)
+
+func ghHandler(toolName string, output any) Result {
+	stdout := extractStdout(output)
+	originalSize := byteLen(ExtractText(output))
+
+	var lines []string
+	for _, l := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		if strings.TrimSpace(l) != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) <= 5 {
+		return shellHandler(toolName, output)
+	}
+
+	var listLines []string
+	for _, l := range lines {
+		if ghListRe.MatchString(l) {
+			listLines = append(listLines, l)
+		}
+	}
+	if float64(len(listLines)) >= math.Ceil(float64(len(lines))*0.5) {
+		n := len(listLines)
+		if n > 10 {
+			n = 10
+		}
+		var rows []string
+		for _, l := range listLines[:n] {
+			parts := strings.Split(l, "\t")
+			if len(parts) > 3 {
+				parts = parts[:3]
+			}
+			rows = append(rows, "  "+firstChars(strings.Join(parts, "  "), 100))
+		}
+		overflow := ""
+		if len(listLines) > 10 {
+			overflow = fmt.Sprintf("\n  … (+%d more)", len(listLines)-10)
+		}
+		plural := "s"
+		if len(listLines) == 1 {
+			plural = ""
+		}
+		return Result{
+			Summary:      fmt.Sprintf("gh — %d item%s\n", len(listLines), plural) + strings.Join(rows, "\n") + overflow,
+			OriginalSize: originalSize,
+		}
+	}
+
+	passCount, failCount := 0, 0
+	for _, l := range lines {
+		if ghPassRe.MatchString(l) {
+			passCount++
+		}
+		if ghFailRe.MatchString(l) {
+			failCount++
+		}
+	}
+	if float64(passCount+failCount) >= math.Ceil(float64(len(lines))*0.4) {
+		var failLines []string
+		for _, l := range lines {
+			if ghFailRe.MatchString(l) {
+				failLines = append(failLines, l)
+			}
+		}
+		if len(failLines) > 5 {
+			failLines = failLines[:5]
+		}
+		var out []string
+		out = append(out, fmt.Sprintf("gh checks — %d pass, %d fail", passCount, failCount))
+		for _, l := range failLines {
+			out = append(out, "  fail: "+firstChars(strings.TrimSpace(strings.Split(l, "\t")[0]), 80))
+		}
+		return Result{Summary: strings.Join(out, "\n"), OriginalSize: originalSize}
+	}
+
+	var kvLines []string
+	for _, l := range lines {
+		if ghKvRe.MatchString(l) {
+			kvLines = append(kvLines, l)
+		}
+	}
+	if len(kvLines) >= 2 {
+		n := len(kvLines)
+		if n > 5 {
+			n = 5
+		}
+		var meta []string
+		for _, l := range kvLines[:n] {
+			parts := strings.Split(l, "\t")
+			key := parts[0]
+			vals := parts[1:]
+			key = strings.TrimSuffix(key, ":")
+			meta = append(meta, fmt.Sprintf("  %s: %s", key, firstChars(strings.TrimSpace(strings.Join(vals, " ")), 100)))
+		}
+		return Result{Summary: "gh view\n" + strings.Join(meta, "\n"), OriginalSize: originalSize}
+	}
+
+	return shellHandler(toolName, output)
+}
+
+// ── dispatcher ────────────────────────────────────────────────────────────────
+
+var (
+	cmdGitDiff   = regexp.MustCompile(`^git\s+(diff|show)(\s|$)`)
+	cmdGitLog    = regexp.MustCompile(`^git\s+log(\s|$)`)
+	cmdGitStatus = regexp.MustCompile(`^git\s+status(\s|$)`)
+	cmdTerraform = regexp.MustCompile(`^terraform\s+plan(\s|$)`)
+	cmdPkgNode   = regexp.MustCompile(`^(npm|bun|yarn|pnpm)\s+install(\s|$)`)
+	cmdPkgPip    = regexp.MustCompile(`^pip\d*\s+install(\s|$)`)
+	cmdTestPy    = regexp.MustCompile(`^(pytest|python\s+-m\s+pytest)(\s|$)`)
+	cmdTestJs    = regexp.MustCompile(`^(jest|npx\s+jest|bun\s+test|vitest|npx\s+vitest)(\s|$)`)
+	cmdTestGo    = regexp.MustCompile(`^go\s+test(\s|$)`)
+	cmdDocker1   = regexp.MustCompile(`^docker(-compose)?\s+(ps|compose\s+ps)(\s|$)`)
+	cmdDocker2   = regexp.MustCompile(`^docker\s+compose\s+ps(\s|$)`)
+	cmdBuild     = regexp.MustCompile(`^(make|just)(\s|$)`)
+	cmdGh        = regexp.MustCompile(`^gh\s+`)
+)
+
+// GetBashHandler returns the handler for a native Bash tool call based on the
+// command string in tool_input. Falls back to the shell handler.
+func GetBashHandler(input any) Handler {
+	command := extractCommand(input)
+	if command == "" {
+		return shellHandler
+	}
+	switch {
+	case cmdGitDiff.MatchString(command):
+		return gitDiffHandler
+	case cmdGitLog.MatchString(command):
+		return gitLogHandler
+	case cmdGitStatus.MatchString(command):
+		return gitStatusHandler
+	case cmdTerraform.MatchString(command):
+		return terraformPlanHandler
+	case cmdPkgNode.MatchString(command) || cmdPkgPip.MatchString(command):
+		return packageInstallHandler
+	case cmdTestPy.MatchString(command) || cmdTestJs.MatchString(command) || cmdTestGo.MatchString(command):
+		return testRunnerHandler
+	case cmdDocker1.MatchString(command) || cmdDocker2.MatchString(command):
+		return dockerPsHandler
+	case cmdBuild.MatchString(command):
+		return buildToolHandler
+	case cmdGh.MatchString(command):
+		return ghHandler
+	}
+	return shellHandler
+}

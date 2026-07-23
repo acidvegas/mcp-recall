@@ -1,0 +1,10 @@
+{
+  "status": "ok",
+  "data": [
+    {"id": 1, "name": "alpha", "value": 100,},
+    {"id": 2, "name": "beta", "value": 200}
+    {"id": 3, "name": "gamma" "value": 300},
+    {"id": 4, "name": "delta", "value": },
+  ],
+  "meta": {"page": 1, "total": 4
+  "trailing garbage here that makes this invalid json and keeps going for a while so the fallback text excerpt is still shorter than the original input and therefore counts as compression rather than a pass-through, which is what we want to exercise on the malformed-json edge path"

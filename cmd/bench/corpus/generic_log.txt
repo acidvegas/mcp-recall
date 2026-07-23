@@ -1,0 +1,25 @@
+2026-06-01T10:00:01Z INFO  server starting on :8080 (pid 4412)
+2026-06-01T10:00:01Z INFO  connected to postgres pool=20
+2026-06-01T10:00:01Z INFO  loaded 42 compression profiles (user=3 community=6 bundled=33)
+2026-06-01T10:00:02Z INFO  request GET /health 200 1ms
+2026-06-01T10:00:03Z INFO  request POST /v1/compress 200 12ms tool=mcp__github__list_issues in=51203 out=2101
+2026-06-01T10:00:04Z INFO  request POST /v1/compress 200 34ms tool=mcp__playwright__browser_snapshot in=88012 out=2640
+2026-06-01T10:00:05Z WARN  slow query 812ms: SELECT * FROM stored_outputs WHERE project_key=$1 ORDER BY created_at
+2026-06-01T10:00:06Z INFO  request POST /v1/compress 200 8ms tool=mcp__stripe__list_events in=9905 out=792
+2026-06-01T10:00:07Z ERROR store failed: database is locked (attempt 1/3) tool=mcp__slack__conversations_history
+2026-06-01T10:00:07Z INFO  retrying store after 50ms backoff
+2026-06-01T10:00:08Z INFO  request POST /v1/compress 200 6ms tool=mcp__slack__conversations_history in=23108 out=3004
+2026-06-01T10:00:09Z INFO  eviction ran: shed 3 items (2.1MB) to stay under 500MB cap
+2026-06-01T10:00:10Z WARN  secret detected in output, skipping storage tool=mcp__unknown__dump_env kind=aws_access_key
+2026-06-01T10:00:11Z INFO  request GET /v1/stats 200 4ms items=8421 total_saved_tokens=9214882
+2026-06-01T10:00:12Z ERROR panic recovered in handler: runtime error: index out of range [5] with length 5
+2026-06-01T10:00:12Z ERROR   goroutine 55 [running]: handlers.playwrightHandler(...)
+2026-06-01T10:00:13Z INFO  request POST /v1/compress 200 9ms tool=mcp__tavily__search in=18209 out=2367
+2026-06-01T10:00:14Z INFO  checkpoint: wal truncated 4.2MB
+2026-06-01T10:00:15Z INFO  request GET /health 200 1ms
+2026-06-01T10:00:16Z INFO  request POST /v1/compress 200 7ms tool=mcp__linear__list_issues in=14402 out=1008
+2026-06-01T10:00:17Z WARN  config reloaded: max_size_mb changed 500 -> 1024
+2026-06-01T10:00:18Z INFO  request GET /health 200 1ms
+2026-06-01T10:00:19Z INFO  graceful shutdown requested (SIGTERM)
+2026-06-01T10:00:19Z INFO  drained 2 in-flight requests, closing db pool
+2026-06-01T10:00:20Z INFO  server stopped cleanly

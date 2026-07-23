@@ -1,0 +1,19 @@
+{
+  "command": "SELECT",
+  "rowCount": 12,
+  "rows": [
+    {"tool_name": "mcp__github__list_issues", "items": 842, "original_bytes": 5120345, "summary_bytes": 210114, "ratio": 0.041},
+    {"tool_name": "mcp__playwright__browser_snapshot", "items": 331, "original_bytes": 8801200, "summary_bytes": 264036, "ratio": 0.030},
+    {"tool_name": "mcp__stripe__list_events", "items": 190, "original_bytes": 990500, "summary_bytes": 79240, "ratio": 0.080},
+    {"tool_name": "mcp__slack__conversations_history", "items": 655, "original_bytes": 2310880, "summary_bytes": 300414, "ratio": 0.130},
+    {"tool_name": "mcp__filesystem__read_file", "items": 1204, "original_bytes": 15200400, "summary_bytes": 3040080, "ratio": 0.200},
+    {"tool_name": "mcp__tavily__search", "items": 421, "original_bytes": 1820900, "summary_bytes": 236717, "ratio": 0.130},
+    {"tool_name": "mcp__linear__list_issues", "items": 288, "original_bytes": 1440233, "summary_bytes": 100816, "ratio": 0.070},
+    {"tool_name": "mcp__gitlab__list_merge_requests", "items": 176, "original_bytes": 880440, "summary_bytes": 61630, "ratio": 0.070},
+    {"tool_name": "mcp__sentry__list_issues", "items": 92, "original_bytes": 460220, "summary_bytes": 46022, "ratio": 0.100},
+    {"tool_name": "mcp__postgres__query", "items": 510, "original_bytes": 3060500, "summary_bytes": 612100, "ratio": 0.200},
+    {"tool_name": "Bash", "items": 2044, "original_bytes": 10220400, "summary_bytes": 2044080, "ratio": 0.200},
+    {"tool_name": "mcp__jira__search_issues", "items": 133, "original_bytes": 665000, "summary_bytes": 46550, "ratio": 0.070}
+  ],
+  "fields": ["tool_name", "items", "original_bytes", "summary_bytes", "ratio"]
+}
