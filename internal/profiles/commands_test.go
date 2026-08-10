@@ -5,6 +5,7 @@ package profiles
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -354,6 +355,35 @@ func fakeGh(t *testing.T, failCode int, stderrMsg string) func() {
 	return func() { os.Setenv("PATH", oldPath) }
 }
 
+// Repo scope alone would accept an attestation from any workflow in the
+// profiles repo, so the exact signer SAN must be pinned on every verify (#206).
+func TestVerifyManifestPinsSignerIdentity(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\necho \"$@\" > " + argsFile + "\nexit 0\n"
+	os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o755)
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", dir+string(os.PathListSeparator)+oldPath)
+	defer os.Setenv("PATH", oldPath)
+
+	tmp := filepath.Join(dir, "manifest.json")
+	os.WriteFile(tmp, []byte("{}"), 0o644)
+	if err := verifyManifest(tmp, "error"); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("gh was not invoked: %v", err)
+	}
+	if !strings.Contains(string(got), "--cert-identity "+signerIdentity) {
+		t.Errorf("verify did not pin the signer identity: %q", got)
+	}
+	want := "https://github.com/" + communityRepo + "/.github/workflows/manifest.yml@refs/heads/main"
+	if signerIdentity != want {
+		t.Errorf("signerIdentity = %q, want %q", signerIdentity, want)
+	}
+}
+
 func noGh(t *testing.T) func() {
 	t.Helper()
 	oldPath := os.Getenv("PATH")
@@ -413,9 +443,29 @@ func TestVerifyManifest(t *testing.T) {
 	if !strings.Contains(nogOut, "gh CLI not found") {
 		t.Errorf("no-gh stderr: %q", nogOut)
 	}
-	// error + no gh → degrade gracefully (no error)
-	if err := verifyManifest(tmp, "error"); err != nil {
-		t.Errorf("error+nogh should degrade: %v", err)
+	// error + no gh → fatal: "error" means verification must succeed (#208)
+	err := verifyManifest(tmp, "error")
+	var verr *ManifestVerificationError
+	if !errors.As(err, &verr) {
+		t.Errorf("error+nogh should be fatal, got %v", err)
+	} else if !strings.Contains(verr.Error(), "cannot be verified") ||
+		strings.Contains(verr.Error(), "verification failed") {
+		t.Errorf("unavailable verifier must not read as tampering: %q", verr)
+	}
+	restore()
+
+	// gh too old for the flags we pin with → tooling gap, not tampering
+	restore = fakeGh(t, 1, "unknown flag: --cert-identity")
+	oldOut := captureStderr(func() {
+		if err := verifyManifest(tmp, "warn"); err != nil {
+			t.Errorf("warn+old-gh should not error: %v", err)
+		}
+	})
+	if !strings.Contains(oldOut, "does not support the flags") {
+		t.Errorf("old-gh stderr: %q", oldOut)
+	}
+	if err := verifyManifest(tmp, "error"); !errors.As(err, &verr) {
+		t.Errorf("error+old-gh should be fatal, got %v", err)
 	}
 	restore()
 

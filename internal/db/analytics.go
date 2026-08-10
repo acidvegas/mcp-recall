@@ -21,19 +21,27 @@ func startOfDayUnix(date string) int64 {
 	return t.UTC().Unix()
 }
 
-// GetStats returns aggregate storage stats (counts, sizes, compression ratio).
+// GetStats returns aggregate storage stats for a project. The savings figures
+// (Total*, CompressionRatio) cover intercepted tool output only — recall__note
+// memory is excluded and reported separately as Note*, so a bulk note backend
+// writing thousands of pinned notes can't dilute the compression figure.
+// Pin-budget figures stay store-wide, since notes are pinned and do consume
+// store.max_pinned_mb.
 func GetStats(database *sql.DB, projectKey string) Stats {
 	var s Stats
 	_ = database.QueryRow(`
 		SELECT
-			COUNT(*),
-			COALESCE(SUM(original_size), 0),
-			COALESCE(SUM(summary_size), 0),
+			COALESCE(SUM(CASE WHEN tool_name != 'recall__note' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN tool_name != 'recall__note' THEN original_size ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN tool_name != 'recall__note' THEN summary_size ELSE 0 END), 0),
 			COALESCE(SUM(pinned), 0),
-			COALESCE(SUM(CASE WHEN pinned = 1 THEN original_size ELSE 0 END), 0)
+			COALESCE(SUM(CASE WHEN pinned = 1 THEN original_size ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN tool_name = 'recall__note' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN tool_name = 'recall__note' THEN original_size ELSE 0 END), 0)
 		FROM stored_outputs
 		WHERE project_key = ?`, projectKey).Scan(
-		&s.TotalItems, &s.TotalOriginalBytes, &s.TotalSummaryBytes, &s.PinnedItems, &s.PinnedBytes)
+		&s.TotalItems, &s.TotalOriginalBytes, &s.TotalSummaryBytes, &s.PinnedItems, &s.PinnedBytes,
+		&s.NoteItems, &s.NoteBytes)
 
 	if s.TotalOriginalBytes > 0 {
 		s.CompressionRatio = float64(s.TotalSummaryBytes) / float64(s.TotalOriginalBytes)

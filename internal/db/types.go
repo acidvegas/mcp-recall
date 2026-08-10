@@ -63,12 +63,19 @@ type ForgetOptions struct {
 
 // Stats holds aggregate storage statistics for a project.
 type Stats struct {
+	// Total* and CompressionRatio cover intercepted output only — recall__note
+	// memory is excluded so it never dilutes the savings figure.
 	TotalItems         int
 	TotalOriginalBytes int
 	TotalSummaryBytes  int
 	CompressionRatio   float64
-	PinnedItems        int
-	PinnedBytes        int
+	// Pinned* are store-wide (notes included): pinned bytes are what eviction
+	// cannot reclaim, whatever wrote them.
+	PinnedItems int
+	PinnedBytes int
+	// Note* are recall__note memory — stored memory, not interception.
+	NoteItems int
+	NoteBytes int
 }
 
 // ToolBreakdownRow is a per-tool storage stats row.

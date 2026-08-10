@@ -141,6 +141,8 @@ allowlist         = []                    # un-block specific tools from the den
 
 [profiles]
 verify_signature = "warn"                 # community profile signature policy: "warn" | "error" | "skip"
+                                          # "error" requires verification to *succeed* — a missing or
+                                          # too-old gh CLI is fatal; use --skip-verify to bypass
 
 [debug]
 enabled = false

@@ -1,6 +1,10 @@
 // Package importer implements `mcp-recall import`: restore items from a
 // recall__export JSON dump into the current project's database. Ports
 // src/import/index.ts.
+//
+// Imported rows are always stamped with the current project's key so they are
+// reachable through the project-scoped tool layer. The former
+// `--keep-project-key` flag is rejected (upstream #226) — see HandleImport.
 package importer
 
 import (
@@ -59,13 +63,12 @@ func (r importRow) validate(i int) []string {
 	return issues
 }
 
+// toStored stamps the row with projectKey — always the current project's key,
+// never the dump's, so the row is reachable and deletable through the
+// project-scoped tool layer (upstream #226).
 func (r importRow) toStored(projectKey string) db.StoredOutput {
-	pk := r.ProjectKey
-	if projectKey != "" {
-		pk = projectKey
-	}
 	return db.StoredOutput{
-		ID: r.ID, ProjectKey: pk, SessionID: r.SessionID, ToolName: r.ToolName,
+		ID: r.ID, ProjectKey: projectKey, SessionID: r.SessionID, ToolName: r.ToolName,
 		Summary: r.Summary, FullContent: r.FullContent, OriginalSize: r.OriginalSize,
 		SummarySize: r.SummarySize, CreatedAt: r.CreatedAt, Pinned: r.Pinned,
 		AccessCount: r.AccessCount, LastAccessed: r.LastAccessed, InputHash: r.InputHash,
@@ -77,8 +80,13 @@ type result struct{ imported, skipped, overwritten int }
 // HandleImport implements the import CLI command.
 func HandleImport(args []string) {
 	overwrite := has(args, "--overwrite")
-	keepProjectKey := has(args, "--keep-project-key")
 	dryRun := has(args, "--dry-run")
+
+	if msg := keepProjectKeyRejection(args); msg != "" {
+		fmt.Fprintln(os.Stderr, msg)
+		os.Exit(1)
+	}
+
 	var rawPath string
 	for _, a := range args {
 		if !strings.HasPrefix(a, "--") {
@@ -103,7 +111,7 @@ func HandleImport(args []string) {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil || len(data) == 0 {
 			fmt.Fprintln(os.Stderr, "No file specified and stdin is not readable.")
-			fmt.Fprintln(os.Stderr, "Usage: mcp-recall import <file.json> [--overwrite] [--keep-project-key] [--dry-run]")
+			fmt.Fprintln(os.Stderr, "Usage: mcprecall import <file.json> [--overwrite] [--dry-run]")
 			os.Exit(1)
 		}
 		raw = string(data)
@@ -140,10 +148,6 @@ func HandleImport(args []string) {
 
 	projectKey := projectkey.Key(mustGetwd())
 	dbPath := db.DefaultDBPath(projectKey)
-	targetKey := projectKey
-	if keepProjectKey {
-		targetKey = ""
-	}
 
 	fmt.Printf("\nImporting %d item(s) into %s\n", len(items), dbPath)
 	if dryRun {
@@ -154,7 +158,7 @@ func HandleImport(args []string) {
 	if dryRun {
 		res = dryRunCount(dbPath, items, overwrite)
 	} else {
-		res = importItems(dbPath, items, overwrite, targetKey)
+		res = importItems(dbPath, items, overwrite, projectKey)
 	}
 
 	var parts []string
@@ -205,6 +209,27 @@ func dryRunCount(dbPath string, items []importRow, overwrite bool) result {
 		}
 	}
 	return r
+}
+
+// keepProjectKeyRejection returns the error text for a removed
+// `--keep-project-key` flag, or "" when it is absent.
+//
+// The flag stamped rows with the dump's original project key while still
+// writing them to the *current* project's database — where every project-scoped
+// path (search, list_stored, forget, size accounting) filters on the current
+// key. The rows were therefore unreachable and undeletable through the tool
+// layer. Reject it loudly rather than silently re-stamping, so a caller who
+// relied on it learns why (upstream #226).
+func keepProjectKeyRejection(args []string) string {
+	if !has(args, "--keep-project-key") {
+		return ""
+	}
+	return "The --keep-project-key flag was removed (#226): it wrote rows into the current\n" +
+		"project's database while stamping them with the dump's original key, leaving them\n" +
+		"unreachable by search/list_stored/forget and invisible to the size cap.\n" +
+		"Run `mcprecall import <file>` without it — items land in the current project and\n" +
+		"behave normally. To reach rows already stranded by the old flag, pass an explicit\n" +
+		"project_key to recall__list_stored / recall__forget."
 }
 
 func importItems(dbPath string, items []importRow, overwrite bool, targetKey string) result {

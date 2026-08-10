@@ -699,22 +699,35 @@ func Stats(database *sql.DB, projectKey string, args StatsArgs) string {
 	stats := db.GetStats(database, projectKey)
 	sessionDays := db.GetSessionDays(database)
 
-	if stats.TotalItems == 0 {
+	if stats.TotalItems == 0 && stats.NoteItems == 0 {
 		return "[recall: no data stored for this project yet]"
 	}
 
-	saved := stats.TotalOriginalBytes - stats.TotalSummaryBytes
-	reductionPctVal := toFixed((1-stats.CompressionRatio)*100, 1)
-	tokensSaved := saved / 4
-
-	lines := []string{
-		"Session stats for current project:",
-		fmt.Sprintf("  Items stored:      %d", stats.TotalItems),
-		fmt.Sprintf("  Original size:     %s", format.Bytes(stats.TotalOriginalBytes)),
-		fmt.Sprintf("  Compressed size:   %s", format.Bytes(stats.TotalSummaryBytes)),
-		fmt.Sprintf("  Saved:             %s (%s%% reduction)", format.Bytes(saved), reductionPctVal),
-		fmt.Sprintf("  ~Tokens saved:     ~%s", groupInt(tokensSaved)),
-		fmt.Sprintf("  Session days:      %d", len(sessionDays)),
+	// Savings figures cover intercepted tool output only; recall__note memory is
+	// reported on its own line so a bulk note backend can't dilute them.
+	lines := []string{"Session stats for current project:"}
+	if stats.TotalItems > 0 {
+		saved := stats.TotalOriginalBytes - stats.TotalSummaryBytes
+		reductionPctVal := toFixed((1-stats.CompressionRatio)*100, 1)
+		tokensSaved := saved / 4
+		lines = append(lines,
+			fmt.Sprintf("  Intercepted items: %d", stats.TotalItems),
+			fmt.Sprintf("  Original size:     %s", format.Bytes(stats.TotalOriginalBytes)),
+			fmt.Sprintf("  Compressed size:   %s", format.Bytes(stats.TotalSummaryBytes)),
+			fmt.Sprintf("  Saved:             %s (%s%% reduction)", format.Bytes(saved), reductionPctVal),
+			fmt.Sprintf("  ~Tokens saved:     ~%s", groupInt(tokensSaved)),
+		)
+	} else {
+		lines = append(lines, "  Intercepted items: 0 (no tool output compressed yet)")
+	}
+	lines = append(lines, fmt.Sprintf("  Session days:      %d", len(sessionDays)))
+	if stats.NoteItems > 0 {
+		noteWord := "items"
+		if stats.NoteItems == 1 {
+			noteWord = "item"
+		}
+		lines = append(lines, fmt.Sprintf("  Notes/memory:      %d %s (%s) — stored memory, not interception",
+			stats.NoteItems, noteWord, format.Bytes(stats.NoteBytes)))
 	}
 
 	// Pin-budget awareness: pinned items are exempt from eviction and bounded

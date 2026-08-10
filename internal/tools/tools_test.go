@@ -390,13 +390,49 @@ func TestStats(t *testing.T) {
 	in2.Summary = strings.Repeat("y", 50)
 	store(t, d, in2)
 	r := Stats(d, projectKey, StatsArgs{})
-	hasT(t, r, "Items stored:      2")
+	hasT(t, r, "Intercepted items: 2")
 	hasT(t, r, "reduction")
 	hasT(t, r, "Tokens saved")
 
 	db.RecordSession(d, "2026-03-01")
 	db.RecordSession(d, "2026-02-28")
 	hasT(t, Stats(d, projectKey, StatsArgs{}), "Session days:      2")
+}
+
+// recall__note memory is stored memory, not interception: it must not count
+// toward the savings figures, and is reported on its own line instead.
+func TestStatsExcludesNotesFromSavings(t *testing.T) {
+	d := setup(t)
+	in := baseInput()
+	in.OriginalSize = 10000
+	in.Summary = strings.Repeat("x", 100)
+	store(t, d, in)
+
+	note := baseInput()
+	note.ToolName = "recall__note"
+	note.OriginalSize = 900000
+	note.Summary = strings.Repeat("n", 900000)
+	note.FullContent = strings.Repeat("n", 900000)
+	store(t, d, note)
+
+	r := Stats(d, projectKey, StatsArgs{})
+	hasT(t, r, "Intercepted items: 1")
+	hasT(t, r, "Notes/memory:      1 item")
+	if strings.Contains(r, "0.0% reduction") {
+		t.Errorf("note bytes diluted the compression ratio:\n%s", r)
+	}
+}
+
+// A store holding only notes still reports, rather than claiming no data.
+func TestStatsNotesOnly(t *testing.T) {
+	d := setup(t)
+	note := baseInput()
+	note.ToolName = "recall__note"
+	store(t, d, note)
+
+	r := Stats(d, projectKey, StatsArgs{})
+	hasT(t, r, "Intercepted items: 0 (no tool output compressed yet)")
+	hasT(t, r, "Notes/memory:      1 item")
 }
 
 func TestStatsSuggestions(t *testing.T) {
