@@ -10,12 +10,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"time"
 
+	"mcprecall/internal/db"
+	"mcprecall/internal/gc"
 	"mcprecall/internal/hooks"
 	"mcprecall/internal/importer"
 	"mcprecall/internal/install"
 	"mcprecall/internal/learn"
 	"mcprecall/internal/profiles"
+	"mcprecall/internal/projectkey"
 	"mcprecall/internal/server"
 )
 
@@ -66,6 +71,8 @@ func main() {
 	case "status":
 		r := install.Status(install.DefaultPaths())
 		printStatus(r)
+	case "gc":
+		runGC(os.Args[2:])
 	case "profiles":
 		profiles.HandleProfilesCommand(os.Args[2:])
 	case "learn":
@@ -109,6 +116,10 @@ Commands:
   uninstall            Remove hooks + MCP server
   status               Show current configuration and health
   server               Run the recall MCP server (stdio)
+  gc [--force]         Reclaim disk: list/delete orphaned project DBs
+    --stale-days N     Legacy DBs (no recorded path) older than N days are
+                       candidates (default 90)
+    --vacuum           Full-VACUUM surviving DBs to reclaim free pages
   profiles <cmd>       Manage compression profiles (list/available/info/install/
                        update/remove/seed/feed/check/retrain/test)
   learn                Generate profile suggestions from your installed MCPs
@@ -153,6 +164,39 @@ func printStatus(r install.StatusReport) {
 	fmt.Printf("  %s PostToolUse hook\n", tick(r.PostToolUseHook))
 	fmt.Printf("  %s CLAUDE.md instructions\n", tick(r.ClaudeMD))
 	fmt.Printf("  %s binary present\n", tick(r.BinaryExists))
+}
+
+// runGC parses the gc subcommand's flags and runs it against the live store.
+// Defaults to a dry run; only --force deletes.
+func runGC(args []string) {
+	opts := gc.Options{DryRun: true}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--force":
+			opts.DryRun = false
+		case "--vacuum":
+			opts.Vacuum = true
+		case "--stale-days":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "--stale-days requires a value")
+				os.Exit(1)
+			}
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil || n < 1 {
+				fmt.Fprintln(os.Stderr, "--stale-days must be a positive number")
+				os.Exit(1)
+			}
+			opts.StaleDays = n
+			i++
+		default:
+			fmt.Fprintf(os.Stderr, "unknown gc option: %s\n", args[i])
+			os.Exit(1)
+		}
+	}
+
+	cwd, _ := os.Getwd()
+	currentFile := db.DefaultDBPath(projectkey.Key(cwd))
+	gc.Run(os.Stdout, db.DataDir(), currentFile, opts, time.Now())
 }
 
 // writeJSON writes v as JSON followed by a newline, without HTML-escaping (to

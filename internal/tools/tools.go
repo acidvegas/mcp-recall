@@ -26,6 +26,8 @@ const (
 	snippetMax        = 150
 	listToolColWidth  = 40
 	listIDColWidth    = 16
+	// pinBudgetWarnPct is the share of store.max_pinned_mb at which recall__stats warns.
+	pinBudgetWarnPct = 80
 )
 
 // ── display helpers ───────────────────────────────────────────────────────────
@@ -96,6 +98,46 @@ func plural(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+// resolveScopeKey resolves an optional explicit project_key override for
+// Forget / ListStored. An empty override targets the current project. A
+// supplied-but-blank key is rejected rather than silently falling back, so an
+// operator can never widen scope by accident. There is deliberately no
+// "all projects" wildcard — the override always names exactly one key.
+func resolveScopeKey(currentKey, override string) (key, errMsg string) {
+	if override == "" {
+		return currentKey, ""
+	}
+	trimmed := strings.TrimSpace(override)
+	if trimmed == "" {
+		return "", "[recall: project_key must be a non-empty key — omit it to target the current project]"
+	}
+	return trimmed, ""
+}
+
+// foreignKeyFooter builds a one-line footer naming rows stored under foreign
+// project keys, so an operator can discover and target them. Empty when none exist.
+func foreignKeyFooter(database *sql.DB, currentKey string) string {
+	breakdown := db.ForeignKeyBreakdown(database, currentKey)
+	if len(breakdown) == 0 {
+		return ""
+	}
+	total := 0
+	parts := make([]string, len(breakdown))
+	for i, b := range breakdown {
+		total += b.Count
+		parts[i] = fmt.Sprintf("%s (%d)", b.ProjectKey, b.Count)
+	}
+	keyPlural := "s"
+	if len(breakdown) == 1 {
+		keyPlural = ""
+	}
+	// The delete example is intentionally complete (all + confirmed): Forget needs a
+	// selector, so a project_key-only call would silently match nothing.
+	return fmt.Sprintf("[recall: %d item%s under other project key%s: %s — inspect with "+
+		"recall__list_stored project_key=…, delete with recall__forget project_key=… all=true confirmed=true]",
+		total, plural(total), keyPlural, strings.Join(parts, ", "))
 }
 
 func reductionPct(original, summary int) string {
@@ -248,15 +290,24 @@ func Pin(database *sql.DB, projectKey string, args PinArgs) string {
 	if args.Pinned != nil {
 		pinned = *args.Pinned
 	}
-	ok, _ := db.PinOutput(database, args.ID, projectKey, pinned)
-	if !ok {
+	outcome, _ := db.PinOutputBounded(database, args.ID, projectKey, pinned, config.Load().Store.MaxPinnedMB)
+	if outcome.OK {
+		verb := "pinned"
+		if !pinned {
+			verb = "unpinned"
+		}
+		return fmt.Sprintf("[recall: %s %s]", verb, args.ID)
+	}
+	if outcome.Reason == db.PinNotFound {
 		return fmt.Sprintf(`[recall: no item found with id "%s"]`, args.ID)
 	}
-	verb := "pinned"
-	if !pinned {
-		verb = "unpinned"
-	}
-	return fmt.Sprintf("[recall: %s %s]", verb, args.ID)
+	return fmt.Sprintf("[recall: cannot pin %s — pinned data would reach %s, over the %s "+
+		"store.max_pinned_mb cap. Pinned items are exempt from eviction, so this cap bounds "+
+		"them separately from store.max_size_mb. Unpin an item, raise store.max_pinned_mb, "+
+		"or recall__forget to reclaim space.]",
+		args.ID,
+		format.Bytes(int(outcome.PinnedBytes+outcome.ItemBytes)),
+		format.Bytes(int(outcome.CapBytes)))
 }
 
 // ── recall__note ──────────────────────────────────────────────────────────────
@@ -348,9 +399,26 @@ type ForgetArgs struct {
 	All           bool
 	Confirmed     bool
 	Force         bool
+	ProjectKey    string // "" = current project
 }
 
 func Forget(database *sql.DB, projectKey string, args ForgetArgs) string {
+	scopeKey, errMsg := resolveScopeKey(projectKey, args.ProjectKey)
+	if errMsg != "" {
+		return errMsg
+	}
+	usingOverride := scopeKey != projectKey
+
+	hasSelector := args.All || args.ID != "" || args.Tool != "" ||
+		args.SessionID != "" || args.OlderThanDays != nil
+
+	// A project_key override with no selector matches no branch in ForgetOutputs and
+	// would silently no-op, reading as "nothing there". Reject it explicitly so the
+	// footer's suggested recovery command can't mislead.
+	if args.ProjectKey != "" && !hasSelector {
+		return "[recall: project_key needs a selector — add all: true (with confirmed: true), or id / tool / session_id / older_than_days]"
+	}
+
 	if args.All && !args.Confirmed {
 		return "[recall: clearing all stored items requires confirmed: true]"
 	}
@@ -358,37 +426,73 @@ func Forget(database *sql.DB, projectKey string, args ForgetArgs) string {
 		return "[recall: older_than_days must be at least 1 — use all: true with confirmed: true to delete everything]"
 	}
 
-	deleted, _ := db.ForgetOutputs(database, projectKey, db.ForgetOptions{
+	deleted, _ := db.ForgetOutputs(database, scopeKey, db.ForgetOptions{
 		ID: args.ID, Tool: args.Tool, SessionID: args.SessionID,
 		OlderThanDays: args.OlderThanDays, All: args.All, Force: args.Force,
 	})
 	if deleted == 0 {
+		// Under an override, a zero match may just be a mistyped key — name the keys
+		// that do exist so a typo isn't indistinguishable from "nothing there".
+		if usingOverride {
+			if hint := foreignKeyFooter(database, projectKey); hint != "" {
+				return fmt.Sprintf("[recall: no items matched under project key %s — nothing deleted]\n%s", scopeKey, hint)
+			}
+			return fmt.Sprintf("[recall: no items matched under project key %s — nothing deleted]", scopeKey)
+		}
 		return "[recall: no items matched — nothing deleted]"
 	}
-	return fmt.Sprintf("[recall: deleted %d item%s]", deleted, plural(deleted))
+	scopeNote := ""
+	if usingOverride {
+		scopeNote = " under project key " + scopeKey
+	}
+	return fmt.Sprintf("[recall: deleted %d item%s%s]", deleted, plural(deleted), scopeNote)
 }
 
 // ── recall__list_stored ───────────────────────────────────────────────────────
 
 type ListStoredArgs struct {
-	Limit  int // 0 = default 10
-	Offset int
-	Tool   string
-	Sort   string // "recent" | "accessed" | "size"
+	Limit      int // 0 = default 10
+	Offset     int
+	Tool       string
+	Sort       string // "recent" | "accessed" | "size"
+	ProjectKey string // "" = current project
 }
 
 func ListStored(database *sql.DB, projectKey string, args ListStoredArgs) string {
+	scopeKey, errMsg := resolveScopeKey(projectKey, args.ProjectKey)
+	if errMsg != "" {
+		return errMsg
+	}
+	usingOverride := scopeKey != projectKey
+
 	limit := args.Limit
 	if limit == 0 {
 		limit = 10
 	}
-	items := db.ListStoredSorted(database, projectKey, args.Tool, args.Sort, limit, args.Offset)
+	items := db.ListStoredSorted(database, scopeKey, args.Tool, args.Sort, limit, args.Offset)
+
+	// Discovery footer only on the default (current-project) scope, first page —
+	// not when already listing an explicit foreign key.
+	footerSuffix := ""
+	if !usingOverride && args.Offset == 0 {
+		if f := foreignKeyFooter(database, projectKey); f != "" {
+			footerSuffix = "\n" + f
+		}
+	}
 
 	if len(items) == 0 {
 		if args.Offset > 0 {
 			return "[recall: no more items]"
 		}
-		return "[recall: no stored items]"
+		if usingOverride {
+			// A zero-row override may be a mistyped key — name the keys that exist.
+			base := fmt.Sprintf("[recall: no stored items under project key %s]", scopeKey)
+			if hint := foreignKeyFooter(database, projectKey); hint != "" {
+				return base + "\n" + hint
+			}
+			return base
+		}
+		return "[recall: no stored items]" + footerSuffix
 	}
 
 	var rows []string
@@ -409,7 +513,7 @@ func ListStored(database *sql.DB, projectKey string, args ListStoredArgs) string
 	separator := strings.Repeat("-", runeLen(header))
 
 	out := append([]string{header, separator}, rows...)
-	return strings.Join(out, "\n")
+	return strings.Join(out, "\n") + footerSuffix
 }
 
 // ── recall__context ───────────────────────────────────────────────────────────
@@ -611,6 +715,29 @@ func Stats(database *sql.DB, projectKey string, args StatsArgs) string {
 		fmt.Sprintf("  Saved:             %s (%s%% reduction)", format.Bytes(saved), reductionPctVal),
 		fmt.Sprintf("  ~Tokens saved:     ~%s", groupInt(tokensSaved)),
 		fmt.Sprintf("  Session days:      %d", len(sessionDays)),
+	}
+
+	// Pin-budget awareness: pinned items are exempt from eviction and bounded
+	// separately by store.max_pinned_mb, which recall__pin enforces at pin time.
+	// Report usage against that cap (an existing store may already be over it).
+	if stats.PinnedItems > 0 {
+		maxPinnedMB := config.Load().Store.MaxPinnedMB
+		maxBytes := maxPinnedMB * 1024 * 1024
+		capPct := 0.0
+		if maxBytes > 0 {
+			capPct = float64(stats.PinnedBytes) / maxBytes * 100
+		}
+		itemWord := "items"
+		if stats.PinnedItems == 1 {
+			itemWord = "item"
+		}
+		lines = append(lines, fmt.Sprintf("  Pinned:            %d %s (%s, %s%% of max_pinned_mb)",
+			stats.PinnedItems, itemWord, format.Bytes(stats.PinnedBytes), toFixed(capPct, 0)))
+		if capPct >= pinBudgetWarnPct {
+			lines = append(lines, fmt.Sprintf("  ⚠ Pinned data is %s%% of the %g MB store.max_pinned_mb cap."+
+				" New pins are refused once it is full — unpin or raise the cap to make room.",
+				toFixed(capPct, 0), maxPinnedMB))
+		}
 	}
 
 	breakdown := db.GetToolBreakdown(database, projectKey)

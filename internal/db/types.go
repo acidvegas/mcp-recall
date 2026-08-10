@@ -67,6 +67,8 @@ type Stats struct {
 	TotalOriginalBytes int
 	TotalSummaryBytes  int
 	CompressionRatio   float64
+	PinnedItems        int
+	PinnedBytes        int
 }
 
 // ToolBreakdownRow is a per-tool storage stats row.

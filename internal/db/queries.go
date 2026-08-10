@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"math"
 	"sort"
 	"strings"
@@ -185,18 +186,81 @@ func RecordAccess(database *sql.DB, id string) error {
 	return err
 }
 
-// PinOutput pins or unpins an item. Returns true if the item was found/updated.
+// PinReason explains why a PinOutcome was not OK.
+type PinReason string
+
+const (
+	// PinNotFound means no item matched the id within the project.
+	PinNotFound PinReason = "not_found"
+	// PinOverBudget means pinning would push total pinned bytes past the cap.
+	PinOverBudget PinReason = "over_budget"
+)
+
+// PinOutcome is the result of a pin attempt. On PinOverBudget the byte figures
+// are populated so the caller can build an actionable message without re-querying.
+type PinOutcome struct {
+	OK          bool
+	Reason      PinReason
+	PinnedBytes int64
+	ItemBytes   int64
+	CapBytes    int64
+}
+
+// PinOutput pins or unpins an item without a budget check. Returns true if the
+// item was found/updated. Used by internal callers that pin unconditionally;
+// user-facing pins go through PinOutputBounded.
 func PinOutput(database *sql.DB, id, projectKey string, pinned bool) (bool, error) {
+	outcome, err := PinOutputBounded(database, id, projectKey, pinned, 0)
+	return outcome.OK, err
+}
+
+// PinOutputBounded pins or unpins an item, enforcing the pinned-data cap at the
+// write. Pinned items are exempt from expiry and eviction, so an unbounded number
+// of pins would silently void store.max_size_mb. When pinning a not-yet-pinned
+// item and maxPinnedMB is positive, if the item's original_size would push total
+// pinned bytes over the cap the row is left unpinned and PinOverBudget is
+// returned — so the bound holds even if the caller ignores the result and keeps
+// pinning. Unpinning, and re-pinning an already-pinned item, are never checked.
+// A non-positive maxPinnedMB disables the check.
+func PinOutputBounded(database *sql.DB, id, projectKey string, pinned bool, maxPinnedMB float64) (PinOutcome, error) {
+	var itemSize int64
+	var alreadyPinned int
+	err := database.QueryRow(
+		`SELECT original_size, pinned FROM stored_outputs WHERE id = ? AND project_key = ?`,
+		id, projectKey).Scan(&itemSize, &alreadyPinned)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PinOutcome{Reason: PinNotFound}, nil
+	}
+	if err != nil {
+		return PinOutcome{}, err
+	}
+
+	if pinned && alreadyPinned == 0 && maxPinnedMB > 0 {
+		capBytes := int64(maxPinnedMB * 1024 * 1024)
+		var pinnedBytes int64
+		if err := database.QueryRow(
+			`SELECT COALESCE(SUM(original_size), 0) FROM stored_outputs WHERE project_key = ? AND pinned = 1`,
+			projectKey).Scan(&pinnedBytes); err != nil {
+			return PinOutcome{}, err
+		}
+		if pinnedBytes+itemSize > capBytes {
+			return PinOutcome{
+				Reason:      PinOverBudget,
+				PinnedBytes: pinnedBytes,
+				ItemBytes:   itemSize,
+				CapBytes:    capBytes,
+			}, nil
+		}
+	}
+
 	p := 0
 	if pinned {
 		p = 1
 	}
-	res, err := database.Exec(`UPDATE stored_outputs SET pinned = ? WHERE id = ? AND project_key = ?`, p, id, projectKey)
-	if err != nil {
-		return false, err
+	if _, err := database.Exec(`UPDATE stored_outputs SET pinned = ? WHERE id = ? AND project_key = ?`, p, id, projectKey); err != nil {
+		return PinOutcome{}, err
 	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	return PinOutcome{OK: true}, nil
 }
 
 // CheckDedup looks up the most recent stored output with a matching input_hash
@@ -326,6 +390,7 @@ func EvictIfNeeded(database *sql.DB, projectKey string, maxSizeMB float64, halfL
 	if _, err := database.Exec(`DELETE FROM stored_outputs WHERE id IN (`+placeholders+`)`, toEvict...); err != nil {
 		return 0, err
 	}
+	ReclaimPages(database, len(toEvict))
 	return len(toEvict), nil
 }
 
@@ -532,18 +597,92 @@ func ForgetOutputs(database *sql.DB, projectKey string, options ForgetOptions) (
 		return 0, err
 	}
 
-	if deleted >= VacuumThreshold {
-		if _, err := database.Exec("PRAGMA incremental_vacuum"); err != nil {
-			logx.Warn("incremental_vacuum failed — " + err.Error())
-		}
-	}
+	ReclaimPages(database, deleted)
 	return deleted, nil
+}
+
+// ReclaimPages returns free pages to the OS after a bulk delete, when enough
+// rows were removed to be worth the work. A no-op on databases created without
+// auto_vacuum=INCREMENTAL (e.g. legacy stores) — those must be reclaimed with a
+// full VACUUM, which `mcprecall gc --vacuum` performs. Never returns an error.
+func ReclaimPages(database *sql.DB, deleted int) {
+	if deleted < VacuumThreshold {
+		return
+	}
+	if _, err := database.Exec("PRAGMA incremental_vacuum"); err != nil {
+		logx.Warn("incremental_vacuum failed — " + err.Error())
+	}
+}
+
+// SetMeta upserts a key/value pair into the per-project meta table.
+func SetMeta(database *sql.DB, key, value string) error {
+	_, err := database.Exec(
+		`INSERT INTO meta (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
+
+// GetMeta reads a value from the meta table. Returns "" if the key is absent.
+// The error is non-nil only for a real read failure (e.g. no meta table at all,
+// which is a legitimate legacy database), letting callers distinguish "absent"
+// from "cannot be read".
+func GetMeta(database *sql.DB, key string) (string, error) {
+	var v string
+	err := database.QueryRow(`SELECT value FROM meta WHERE key = ?`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return v, nil
 }
 
 // PruneExpired deletes non-pinned items created more than calendarDays ago.
 func PruneExpired(database *sql.DB, projectKey string, calendarDays int) (int, error) {
 	cutoff := nowUnix() - int64(calendarDays)*86400
-	return countAndDelete(database, "created_at < ? AND project_key = ? AND pinned = 0", cutoff, projectKey)
+	deleted, err := countAndDelete(database, "created_at < ? AND project_key = ? AND pinned = 0", cutoff, projectKey)
+	if err != nil {
+		return 0, err
+	}
+	ReclaimPages(database, deleted)
+	return deleted, nil
+}
+
+// ForeignCount is a row count under a project key other than the current one.
+type ForeignCount struct {
+	ProjectKey string
+	Count      int
+}
+
+// ForeignKeyBreakdown returns the count of stored outputs grouped by every
+// project key OTHER than the current one, most rows first. Used to surface rows
+// stranded under a foreign key so they can be enumerated and deleted through the
+// tool layer.
+func ForeignKeyBreakdown(database *sql.DB, currentKey string) []ForeignCount {
+	rows, err := database.Query(`
+		SELECT project_key, COUNT(*) AS n
+		FROM stored_outputs
+		WHERE project_key != ?
+		GROUP BY project_key
+		ORDER BY n DESC, project_key ASC`, currentKey)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []ForeignCount
+	for rows.Next() {
+		var fc ForeignCount
+		if err := rows.Scan(&fc.ProjectKey, &fc.Count); err != nil {
+			return nil
+		}
+		out = append(out, fc)
+	}
+	if rows.Err() != nil {
+		return nil
+	}
+	return out
 }
 
 // RecordSession records a session date (YYYY-MM-DD). No-op if already present.

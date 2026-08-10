@@ -28,9 +28,12 @@ func GetStats(database *sql.DB, projectKey string) Stats {
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(original_size), 0),
-			COALESCE(SUM(summary_size), 0)
+			COALESCE(SUM(summary_size), 0),
+			COALESCE(SUM(pinned), 0),
+			COALESCE(SUM(CASE WHEN pinned = 1 THEN original_size ELSE 0 END), 0)
 		FROM stored_outputs
-		WHERE project_key = ?`, projectKey).Scan(&s.TotalItems, &s.TotalOriginalBytes, &s.TotalSummaryBytes)
+		WHERE project_key = ?`, projectKey).Scan(
+		&s.TotalItems, &s.TotalOriginalBytes, &s.TotalSummaryBytes, &s.PinnedItems, &s.PinnedBytes)
 
 	if s.TotalOriginalBytes > 0 {
 		s.CompressionRatio = float64(s.TotalSummaryBytes) / float64(s.TotalOriginalBytes)

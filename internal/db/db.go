@@ -63,6 +63,11 @@ const schema = `
   CREATE TABLE IF NOT EXISTS sessions (
     date TEXT PRIMARY KEY
   );
+
+  CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
 `
 
 // migrations are columns added after the initial schema — applied once,
@@ -84,6 +89,17 @@ func DefaultDBPath(projectKey string) string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".local", "share", "mcp-recall", projectKey+".db")
+}
+
+// DataDir returns the directory holding per-project databases. When
+// RECALL_DB_PATH overrides to a single file, returns its parent directory so
+// callers that scan the store (e.g. gc) operate on the right location.
+func DataDir() string {
+	if p := os.Getenv("RECALL_DB_PATH"); p != "" {
+		return filepath.Dir(p)
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "mcp-recall")
 }
 
 // Open opens (creating if needed) the SQLite database at path, applies pragmas,
