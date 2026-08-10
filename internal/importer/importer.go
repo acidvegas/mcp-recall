@@ -38,6 +38,10 @@ type importRow struct {
 	AccessCount  int     `json:"access_count"`
 	LastAccessed *int64  `json:"last_accessed"`
 	InputHash    *string `json:"input_hash"`
+	// FullRetained is optional for backward-compat with dumps predating
+	// store.retention: an older dump has no flag and its rows all carry bodies,
+	// so a missing value defaults to retained (1).
+	FullRetained *int `json:"full_retained"`
 }
 
 func (r importRow) validate(i int) []string {
@@ -67,11 +71,16 @@ func (r importRow) validate(i int) []string {
 // never the dump's, so the row is reachable and deletable through the
 // project-scoped tool layer (upstream #226).
 func (r importRow) toStored(projectKey string) db.StoredOutput {
+	fullRetained := 1
+	if r.FullRetained != nil {
+		fullRetained = *r.FullRetained
+	}
 	return db.StoredOutput{
 		ID: r.ID, ProjectKey: projectKey, SessionID: r.SessionID, ToolName: r.ToolName,
 		Summary: r.Summary, FullContent: r.FullContent, OriginalSize: r.OriginalSize,
 		SummarySize: r.SummarySize, CreatedAt: r.CreatedAt, Pinned: r.Pinned,
 		AccessCount: r.AccessCount, LastAccessed: r.LastAccessed, InputHash: r.InputHash,
+		FullRetained: fullRetained,
 	}
 }
 

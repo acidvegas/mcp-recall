@@ -19,6 +19,9 @@ type StoredOutput struct {
 	LastAccessed *int64
 	InputHash    *string
 	OutputHash   *string
+	// FullRetained is 1 when the verbatim body is persisted (retrievable), 0 when
+	// the row is summary-only (body dropped per store.retention).
+	FullRetained int
 }
 
 // StoreInput is the input required to persist a new compressed tool output.
@@ -33,6 +36,11 @@ type StoreInput struct {
 	// OutputHash is the precomputed sha256 of FullContent; StoreOutput derives
 	// it when nil.
 	OutputHash *string
+	// FullRetained nil (default) persists the verbatim body and chunks it for
+	// retrieval; 0 stores the row summary-only — FullContent is not persisted and
+	// no chunks are written, but OutputHash is still derived from the real
+	// content so dedup keeps working.
+	FullRetained *int
 }
 
 // SearchOptions configures full-text search across stored outputs.

@@ -8,8 +8,6 @@ import (
 	"math"
 	"regexp"
 	"strings"
-
-	"mcprecall/internal/jsonx"
 )
 
 // ── terraform plan ────────────────────────────────────────────────────────────
@@ -197,14 +195,15 @@ func buildToolHandler(toolName string, output any) Result {
 		return shellHandler(toolName, output)
 	}
 
+	// Determine overall result from the exit code if available. Use
+	// extractExitCode so the JSON-string Bash payload is parsed (a bare property
+	// read sees nothing).
 	status := ""
-	if obj, ok := output.(*jsonx.Obj); ok {
-		if ec, ok := objNum(obj, "exit_code"); ok {
-			if ec == 0 {
-				status = "✓"
-			} else {
-				status = "✗"
-			}
+	if ec, ok := extractExitCode(output); ok {
+		if ec == 0 {
+			status = "✓"
+		} else {
+			status = "✗"
 		}
 	}
 
@@ -355,22 +354,58 @@ var (
 	cmdDocker2   = regexp.MustCompile(`^docker\s+compose\s+ps(\s|$)`)
 	cmdBuild     = regexp.MustCompile(`^(make|just)(\s|$)`)
 	cmdGh        = regexp.MustCompile(`^gh\s+`)
+
+	cmdGitGrep      = regexp.MustCompile(`^git\s+grep(\s|$)`)
+	cmdGitBranch    = regexp.MustCompile(`^git\s+branch(\s|$)`)
+	cmdGitStashList = regexp.MustCompile(`^git\s+stash\s+list(\s|$)`)
+	cmdGitRemote    = regexp.MustCompile(`^git\s+remote(\s|$)`)
+
+	cmdCargoBuild = regexp.MustCompile(`^cargo\s+(build|check|clippy)(\s|$)`)
+	cmdGoBuild    = regexp.MustCompile(`^go\s+(build|vet)(\s|$)`)
+	cmdTsc        = regexp.MustCompile(`^(npx\s+)?tsc(\s|$)`)
+	cmdEslint     = regexp.MustCompile(`^(npx\s+)?eslint(\s|$)`)
+	cmdRuff       = regexp.MustCompile(`^ruff(\s|$)`)
+	cmdRunScript  = regexp.MustCompile(`^(npm|pnpm|yarn|bun)\s+run\s+(typecheck|lint|build|check)(\s|$)`)
+
+	cmdGrep = regexp.MustCompile(`^(grep|egrep|fgrep|rg|ag)(\s|$)`)
+	cmdLs   = regexp.MustCompile(`^ls(\s|$)`)
+	cmdFind = regexp.MustCompile(`^(find|fd)(\s|$)`)
+
+	cdPrefixRe    = regexp.MustCompile(`(?s)^cd\s+[^\s&;]+\s*(?:&&|;)\s*(.+)$`)
+	gitGlobalOpts = regexp.MustCompile(`^git\s+(?:(?:--no-pager|--paginate|-P)\s+|-[cC]\s+\S+\s+)+`)
 )
+
+// normalizeCommand normalises a Bash command so routing sees the real
+// subcommand: it unwraps a leading `cd <dir> && …` and strips git global options
+// (--no-pager, -C <path>, -c <k=v>, --paginate, -P) that would otherwise push
+// `git diff` output to the generic shell fallback.
+func normalizeCommand(command string) string {
+	c := strings.TrimSpace(command)
+	if m := cdPrefixRe.FindStringSubmatch(c); m != nil {
+		c = strings.TrimSpace(m[1])
+	}
+	return gitGlobalOpts.ReplaceAllString(c, "git ")
+}
 
 // GetBashHandler returns the handler for a native Bash tool call based on the
 // command string in tool_input. Falls back to the shell handler.
 func GetBashHandler(input any) Handler {
-	command := extractCommand(input)
-	if command == "" {
+	rawCommand := extractCommand(input)
+	if rawCommand == "" {
 		return shellHandler
 	}
+	command := normalizeCommand(rawCommand)
 	switch {
+	case cmdGitGrep.MatchString(command):
+		return grepHandler
 	case cmdGitDiff.MatchString(command):
 		return gitDiffHandler
 	case cmdGitLog.MatchString(command):
 		return gitLogHandler
 	case cmdGitStatus.MatchString(command):
 		return gitStatusHandler
+	case cmdGitBranch.MatchString(command), cmdGitStashList.MatchString(command), cmdGitRemote.MatchString(command):
+		return gitRefsHandler
 	case cmdTerraform.MatchString(command):
 		return terraformPlanHandler
 	case cmdPkgNode.MatchString(command) || cmdPkgPip.MatchString(command):
@@ -383,6 +418,20 @@ func GetBashHandler(input any) Handler {
 		return buildToolHandler
 	case cmdGh.MatchString(command):
 		return ghHandler
+	// Compiler / linter diagnostics (build, typecheck, lint). Safe to route
+	// broadly: the handler falls back to shell when it finds no diagnostics.
+	case cmdCargoBuild.MatchString(command), cmdGoBuild.MatchString(command),
+		cmdTsc.MatchString(command), cmdEslint.MatchString(command),
+		cmdRuff.MatchString(command), cmdRunScript.MatchString(command):
+		return compilerDiagnosticsHandler
+	// Search / listing — bulk is length, not structure. Handlers report the count
+	// plus a capped sample and fall back to shell on an unexpected shape.
+	case cmdGrep.MatchString(command):
+		return grepHandler
+	case cmdLs.MatchString(command):
+		return lsHandler
+	case cmdFind.MatchString(command):
+		return findHandler
 	}
 	return shellHandler
 }

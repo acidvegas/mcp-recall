@@ -188,6 +188,15 @@ func Retrieve(database *sql.DB, args RetrieveArgs) string {
 		}
 	}
 
+	// Summary-only rows (store.retention) have no verbatim body or chunks. Return
+	// the summary with an explicit note instead of an empty/misleading result, so
+	// full/peek never silently yields nothing.
+	if item.FullRetained == 0 && mode != "summary" {
+		return header + "\n" + item.Summary + "\n" +
+			"[recall: full body was not retained for this output (summary-only) — " +
+			`re-run the command for current output, or set store.retention="full" to keep future bodies]`
+	}
+
 	fullCapped := func() string {
 		content := firstChars(item.FullContent, cap)
 		truncated := ""
@@ -369,6 +378,9 @@ func storedToObj(s db.StoredOutput) *jsonx.Obj {
 	} else {
 		o.Set("input_hash", nil)
 	}
+	// Exported so a dump round-trips: import must not chunk a body that a
+	// summary-only row never had.
+	o.Set("full_retained", float64(s.FullRetained))
 	if s.OutputHash != nil {
 		o.Set("output_hash", *s.OutputHash)
 	} else {

@@ -41,19 +41,22 @@ func InsertFull(database *sql.DB, o StoredOutput) error {
 		INSERT INTO stored_outputs
 			(id, project_key, session_id, tool_name, summary, full_content,
 			 original_size, summary_size, created_at, pinned, access_count,
-			 last_accessed, input_hash)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 last_accessed, input_hash, full_retained)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		o.ID, o.ProjectKey, o.SessionID, o.ToolName, o.Summary, o.FullContent,
 		o.OriginalSize, o.SummarySize, o.CreatedAt, o.Pinned, o.AccessCount,
-		nullInt(o.LastAccessed), nullString(o.InputHash),
+		nullInt(o.LastAccessed), nullString(o.InputHash), o.FullRetained,
 	)
 	if err != nil {
 		tx.Rollback()
 		return err
 	}
-	if err := storeChunks(tx, o.ID, o.FullContent); err != nil {
-		tx.Rollback()
-		return err
+	// Summary-only rows have no body, so skip chunking — matches StoreOutput.
+	if o.FullRetained != 0 {
+		if err := storeChunks(tx, o.ID, o.FullContent); err != nil {
+			tx.Rollback()
+			return err
+		}
 	}
 	return tx.Commit()
 }

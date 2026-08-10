@@ -130,6 +130,10 @@ pin_recommendation_threshold = 5          # access count before suggesting a pin
 stale_item_days              = 3          # age before flagging cleanup candidates
 eviction_half_life_days      = 7          # decay half-life for recency-weighted eviction
 gc_reminder_mb               = 2048       # nudge to run `gc` past this store size (0 disables)
+retention                    = "balanced" # which bodies stay retrievable: "full" | "balanced" | "minimal"
+                                          # balanced keeps MCP/web/API results and network Bash
+                                          # (curl/wget/gh api) and stores reproducible Bash
+                                          # (git/tests/ls/grep) summary-only; notes always keep theirs
 
 [retrieve]
 default_max_bytes = 8192                  # default retrieve size cap

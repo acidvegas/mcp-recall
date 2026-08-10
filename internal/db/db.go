@@ -79,6 +79,9 @@ var migrations = []string{
 	"ALTER TABLE stored_outputs ADD COLUMN input_hash TEXT",
 	"ALTER TABLE stored_outputs ADD COLUMN output_hash TEXT",
 	"CREATE INDEX IF NOT EXISTS idx_so_output_hash ON stored_outputs(project_key, output_hash)",
+	// Whether the verbatim body is persisted (1) or the row is summary-only (0).
+	// Existing rows all have bodies, so default 1. See store.retention.
+	"ALTER TABLE stored_outputs ADD COLUMN full_retained INTEGER NOT NULL DEFAULT 1",
 }
 
 // DefaultDBPath returns the SQLite path for a project. Respects RECALL_DB_PATH;

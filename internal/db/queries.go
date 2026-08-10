@@ -19,7 +19,8 @@ import (
 
 // storedColumns is the explicit column list matching StoredOutput scan order.
 const storedColumns = `id, project_key, session_id, tool_name, summary, full_content,
-	original_size, summary_size, created_at, pinned, access_count, last_accessed, input_hash, output_hash`
+	original_size, summary_size, created_at, pinned, access_count, last_accessed, input_hash, output_hash,
+	full_retained`
 
 // VacuumThreshold is the minimum number of deleted rows that triggers
 // incremental_vacuum to reclaim disk space.
@@ -34,7 +35,7 @@ func scanOutput(s interface {
 	err := s.Scan(
 		&o.ID, &o.ProjectKey, &o.SessionID, &o.ToolName, &o.Summary, &o.FullContent,
 		&o.OriginalSize, &o.SummarySize, &o.CreatedAt, &o.Pinned, &o.AccessCount,
-		&lastAccessed, &inputHash, &outputHash,
+		&lastAccessed, &inputHash, &outputHash, &o.FullRetained,
 	)
 	if err != nil {
 		return o, err
@@ -111,10 +112,22 @@ func StoreOutput(database *sql.DB, in StoreInput) (StoredOutput, error) {
 	createdAt := nowUnix()
 	// Content hash enables dedup of identical output across different calls.
 	// Reuse the caller's hash when provided (the hook already computed it).
+	// Hash the REAL content even for summary-only rows, so dedup still works.
 	outputHash := in.OutputHash
 	if outputHash == nil {
 		h := HashContent(in.FullContent)
 		outputHash = &h
+	}
+
+	// Summary-only rows (store.retention) drop the verbatim body and its chunks.
+	// full_content is NOT NULL, so store an empty string rather than NULL.
+	fullRetained := 1
+	if in.FullRetained != nil {
+		fullRetained = *in.FullRetained
+	}
+	bodyToStore := in.FullContent
+	if fullRetained == 0 {
+		bodyToStore = ""
 	}
 
 	tx, err := database.Begin()
@@ -124,19 +137,21 @@ func StoreOutput(database *sql.DB, in StoreInput) (StoredOutput, error) {
 	_, err = tx.Exec(`
 		INSERT INTO stored_outputs
 			(id, project_key, session_id, tool_name, summary, full_content,
-			 original_size, summary_size, created_at, input_hash, output_hash)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 original_size, summary_size, created_at, input_hash, output_hash, full_retained)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, in.ProjectKey, in.SessionID, in.ToolName,
-		in.Summary, in.FullContent, in.OriginalSize,
-		summarySize, createdAt, nullString(in.InputHash), nullString(outputHash),
+		in.Summary, bodyToStore, in.OriginalSize,
+		summarySize, createdAt, nullString(in.InputHash), nullString(outputHash), fullRetained,
 	)
 	if err != nil {
 		tx.Rollback()
 		return StoredOutput{}, err
 	}
-	if err := storeChunks(tx, id, in.FullContent); err != nil {
-		tx.Rollback()
-		return StoredOutput{}, err
+	if fullRetained != 0 {
+		if err := storeChunks(tx, id, in.FullContent); err != nil {
+			tx.Rollback()
+			return StoredOutput{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return StoredOutput{}, err
@@ -144,9 +159,10 @@ func StoreOutput(database *sql.DB, in StoreInput) (StoredOutput, error) {
 
 	return StoredOutput{
 		ID: id, ProjectKey: in.ProjectKey, SessionID: in.SessionID,
-		ToolName: in.ToolName, Summary: in.Summary, FullContent: in.FullContent,
+		ToolName: in.ToolName, Summary: in.Summary, FullContent: bodyToStore,
 		OriginalSize: in.OriginalSize, SummarySize: summarySize, CreatedAt: createdAt,
 		Pinned: 0, AccessCount: 0, LastAccessed: nil, InputHash: in.InputHash, OutputHash: outputHash,
+		FullRetained: fullRetained,
 	}, nil
 }
 

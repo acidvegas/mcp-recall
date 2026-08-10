@@ -99,6 +99,27 @@ func TestRetrieveBasics(t *testing.T) {
 	hasT(t, Retrieve(d, RetrieveArgs{ID: s2.ID, Query: "x", MaxBytes: 100}), "truncated")
 }
 
+// A summary-only row (store.retention) has no body or chunks: full/peek must
+// say so rather than return an empty result.
+func TestRetrieveSummaryOnlyRow(t *testing.T) {
+	d := setup(t)
+	in := baseInput()
+	zero := 0
+	in.FullRetained = &zero
+	s := store(t, d, in)
+
+	for _, mode := range []string{"full", "peek"} {
+		r := Retrieve(d, RetrieveArgs{ID: s.ID, Mode: mode})
+		hasT(t, r, "was not retained")
+		hasT(t, r, in.Summary)
+	}
+	// summary mode is unaffected — that content is still there.
+	sum := Retrieve(d, RetrieveArgs{ID: s.ID, Mode: "summary"})
+	if strings.Contains(sum, "was not retained") {
+		t.Errorf("summary mode should not warn:\n%s", sum)
+	}
+}
+
 func TestRetrieveAccessAndFTS(t *testing.T) {
 	d := setup(t)
 	s := store(t, d, baseInput())

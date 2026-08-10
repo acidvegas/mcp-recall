@@ -26,6 +26,11 @@ type Store struct {
 	StaleItemDays              int
 	EvictionHalfLifeDays       int
 	GCReminderMB               float64
+	// Retention decides which intercepted outputs keep a retrievable full body:
+	// "full" keeps every body; "balanced" keeps MCP/web/API results and network
+	// Bash and drops reproducible Bash (git/tests/ls/grep/cat…); "minimal" drops
+	// all intercepted bodies. Notes always keep their body regardless.
+	Retention string
 }
 
 // defaultPinnedFraction is the share of the effective total cap that bounds
@@ -90,6 +95,7 @@ func defaults() Config {
 			StaleItemDays:              3,
 			EvictionHalfLifeDays:       7,
 			GCReminderMB:               2048,
+			Retention:                  "balanced",
 		},
 		Retrieve: Retrieve{DefaultMaxBytes: 8192},
 		Denylist: Denylist{Additional: []string{}, OverrideDefaults: []string{}, Allowlist: []string{}},
@@ -117,6 +123,7 @@ type partialStore struct {
 	StaleItemDays              *int     `toml:"stale_item_days"`
 	EvictionHalfLifeDays       *int     `toml:"eviction_half_life_days"`
 	GCReminderMB               *tomlNum `toml:"gc_reminder_mb"`
+	Retention                  *string  `toml:"retention"`
 }
 
 type partialRetrieve struct {
@@ -233,6 +240,13 @@ func validate(p *partial) string {
 		if s.GCReminderMB != nil && float64(*s.GCReminderMB) < 0 {
 			issues = append(issues, "store.gc_reminder_mb: must not be negative")
 		}
+		if s.Retention != nil {
+			switch *s.Retention {
+			case "full", "balanced", "minimal":
+			default:
+				issues = append(issues, "store.retention: must be full, balanced, or minimal")
+			}
+		}
 	}
 	if p.Retrieve != nil && p.Retrieve.DefaultMaxBytes != nil && *p.Retrieve.DefaultMaxBytes <= 0 {
 		issues = append(issues, "retrieve.default_max_bytes: must be positive")
@@ -283,6 +297,9 @@ func merge(c *Config, p *partial) {
 		}
 		if s.GCReminderMB != nil {
 			c.Store.GCReminderMB = float64(*s.GCReminderMB)
+		}
+		if s.Retention != nil {
+			c.Store.Retention = *s.Retention
 		}
 	}
 	if p.Retrieve != nil && p.Retrieve.DefaultMaxBytes != nil {
