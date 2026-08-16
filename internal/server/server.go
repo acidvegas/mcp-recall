@@ -89,7 +89,7 @@ func Run(ctx context.Context) error {
 		})
 
 	add("recall__pin",
-		"Pin an item to protect it from expiry and eviction. Use for important results you want to keep indefinitely. Pass pinned: false to unpin.",
+		"Pin an item to protect it from expiry and eviction. Use for important results you want to keep indefinitely. Pass pinned: false to unpin. Pinning can fail: because pinned items are eviction-exempt they are bounded by store.max_pinned_mb, and a pin that would exceed that cap is refused (the response says so and how to make room). Unpinning always succeeds.",
 		`{"type":"object","properties":{"id":{"type":"string","description":"Item ID to pin or unpin"},"pinned":{"type":"boolean","description":"true to pin (default), false to unpin"}},"required":["id"]}`,
 		func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			var a struct {
@@ -121,7 +121,7 @@ func Run(ctx context.Context) error {
 
 	add("recall__forget",
 		"Delete stored items by ID, tool pattern, session, age, or clear all. Pinned items are skipped unless force: true. Single-ID deletes always bypass pin protection.",
-		`{"type":"object","properties":{"id":{"type":"string"},"tool":{"type":"string"},"session_id":{"type":"string"},"older_than_days":{"type":"number"},"all":{"type":"boolean"},"confirmed":{"type":"boolean"},"force":{"type":"boolean"}}}`,
+		`{"type":"object","properties":{"id":{"type":"string"},"tool":{"type":"string"},"session_id":{"type":"string"},"older_than_days":{"type":"number"},"all":{"type":"boolean"},"confirmed":{"type":"boolean"},"force":{"type":"boolean"},"project_key":{"type":"string","description":"Target a specific (e.g. foreign) project key instead of the current project — for deleting rows stranded under another key. Must be an explicit key (no all-projects wildcard) and must be paired with a selector (all + confirmed, or id / tool / session_id / older_than_days). Discover foreign keys via recall__list_stored."}}}`,
 		func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			var a struct {
 				ID            string `json:"id"`
@@ -131,29 +131,33 @@ func Run(ctx context.Context) error {
 				All           bool   `json:"all"`
 				Confirmed     bool   `json:"confirmed"`
 				Force         bool   `json:"force"`
+				ProjectKey    string `json:"project_key"`
 			}
 			unmarshalArgs(req, &a)
 			return safe(func() string {
 				return tools.Forget(database, projectKey, tools.ForgetArgs{
 					ID: a.ID, Tool: a.Tool, SessionID: a.SessionID, OlderThanDays: a.OlderThanDays,
-					All: a.All, Confirmed: a.Confirmed, Force: a.Force,
+					All: a.All, Confirmed: a.Confirmed, Force: a.Force, ProjectKey: a.ProjectKey,
 				})
 			})
 		})
 
 	add("recall__list_stored",
 		"Browse stored items by recency, access frequency, or size. Use to find a specific item to retrieve or forget.",
-		`{"type":"object","properties":{"limit":{"type":"number"},"offset":{"type":"number"},"tool":{"type":"string"},"sort":{"type":"string","enum":["recent","accessed","size"]}}}`,
+		`{"type":"object","properties":{"limit":{"type":"number"},"offset":{"type":"number"},"tool":{"type":"string"},"sort":{"type":"string","enum":["recent","accessed","size"]},"project_key":{"type":"string","description":"List items under a specific (e.g. foreign) project key instead of the current project. Omit to see the current project; a footer then names any foreign keys present."}}}`,
 		func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			var a struct {
-				Limit  int    `json:"limit"`
-				Offset int    `json:"offset"`
-				Tool   string `json:"tool"`
-				Sort   string `json:"sort"`
+				Limit      int    `json:"limit"`
+				Offset     int    `json:"offset"`
+				Tool       string `json:"tool"`
+				Sort       string `json:"sort"`
+				ProjectKey string `json:"project_key"`
 			}
 			unmarshalArgs(req, &a)
 			return safe(func() string {
-				return tools.ListStored(database, projectKey, tools.ListStoredArgs{Limit: a.Limit, Offset: a.Offset, Tool: a.Tool, Sort: a.Sort})
+				return tools.ListStored(database, projectKey, tools.ListStoredArgs{
+					Limit: a.Limit, Offset: a.Offset, Tool: a.Tool, Sort: a.Sort, ProjectKey: a.ProjectKey,
+				})
 			})
 		})
 

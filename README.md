@@ -125,9 +125,15 @@ override field-by-field.
 expire_after_session_days    = 30        # prune items older than N session-days
 key                          = "git_root" # project scope: "git_root" | "cwd"
 max_size_mb                  = 500        # per-project store cap (accepts fractional MB)
+max_pinned_mb                = 250        # cap on pinned data (defaults to half of max_size_mb)
 pin_recommendation_threshold = 5          # access count before suggesting a pin
 stale_item_days              = 3          # age before flagging cleanup candidates
 eviction_half_life_days      = 7          # decay half-life for recency-weighted eviction
+gc_reminder_mb               = 2048       # nudge to run `gc` past this store size (0 disables)
+retention                    = "balanced" # which bodies stay retrievable: "full" | "balanced" | "minimal"
+                                          # balanced keeps MCP/web/API results and network Bash
+                                          # (curl/wget/gh api) and stores reproducible Bash
+                                          # (git/tests/ls/grep) summary-only; notes always keep theirs
 
 [retrieve]
 default_max_bytes = 8192                  # default retrieve size cap
@@ -139,6 +145,8 @@ allowlist         = []                    # un-block specific tools from the den
 
 [profiles]
 verify_signature = "warn"                 # community profile signature policy: "warn" | "error" | "skip"
+                                          # "error" requires verification to *succeed* — a missing or
+                                          # too-old gh CLI is fatal; use --skip-verify to bypass
 
 [debug]
 enabled = false
@@ -150,6 +158,52 @@ The store enforces the `max_size_mb` cap with **recency-weighted eviction**:
 each item's value is `(access_count + 1)` decayed by an exponential half-life on
 the time since last use, so a stale but once-popular item is shed before a fresh
 one. Pinned items are never evicted.
+
+Because pinned items are eviction-exempt, an unbounded number of pins would
+silently void `max_size_mb`. They are therefore bounded separately by
+`max_pinned_mb`, enforced at pin time: a pin that would exceed the cap is
+refused and the item is left unpinned. Unpinning always succeeds. When
+`max_pinned_mb` is not set explicitly it derives as half of `max_size_mb`, so
+lowering the total cap alone can never produce a `max_pinned_mb > max_size_mb`
+contradiction; setting both in contradiction rejects the config to defaults.
+`recall__stats` reports pinned usage against the cap and warns past 80%.
+
+### Reclaiming disk — `mcprecall gc`
+
+Per-project databases outlive their projects: once a project directory is
+deleted its database is never reopened, so the session-start prune never runs
+against it and it lingers forever. `gc` classifies every `*.db` in the store and
+reports what can be reclaimed.
+
+```
+mcprecall gc                      # dry run — report only, nothing deleted
+mcprecall gc --force              # delete the marked databases
+mcprecall gc --stale-days 30      # widen/narrow the legacy window (default 90)
+mcprecall gc --vacuum             # full-VACUUM the databases being kept
+```
+
+Classification drives a single deletion policy:
+
+| Status | Meaning | Deleted by `--force` |
+|---|---|---|
+| `current` | the live project's database | never |
+| `active` | recorded path still exists | never |
+| `ORPHANED` | recorded path gone, **parent still exists** — project really deleted | yes |
+| `unverifiable` | path *and* parent gone (likely an unmounted volume), or a relative path with no knowable root | never |
+| `legacy` | no recorded path, recently modified | never |
+| `LEGACY-STALE` | no recorded path, untouched past `--stale-days` | yes |
+| `unreadable` | not an mcp-recall database, or corrupt | never |
+
+Orphan detection needs a recorded `project_path`, which session-start writes on
+each run — and only when it resolves to a real directory, so a bad guess can
+never mark a live project as deleted. Databases predating this stay pathless and
+are reclaimed solely on the untouched-for-N-days rule, never on a
+deleted-project inference.
+
+`--vacuum` is orthogonal to `--force`: it rewrites the databases being *kept*,
+which reclaims free pages and upgrades legacy `auto_vacuum=NONE` stores to
+incremental. It never touches deletion candidates, the live database, or
+anything unverifiable.
 
 ## Security
 

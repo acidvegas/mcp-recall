@@ -48,7 +48,43 @@ func extractStderr(output any) string {
 			return stripAnsi(s)
 		}
 	}
+	// Bash tool responses also arrive as a JSON string: {exit_code, stdout,
+	// stderr}. Parse it so stderr-bound output (compiler/build errors) isn't
+	// dropped.
+	if parsed, err := jsonx.ParseString(ExtractText(output)); err == nil {
+		if obj, ok := parsed.(*jsonx.Obj); ok {
+			if s, ok := objStr(obj, "stderr"); ok {
+				return stripAnsi(s)
+			}
+		}
+	}
 	return ""
+}
+
+// extractExitCode reads the process exit code from a native Bash tool response,
+// handling both the object shape {exit_code} and the JSON-string shape the Bash
+// tool actually delivers. ok is false when no code is present.
+func extractExitCode(output any) (int, bool) {
+	read := func(v any) (int, bool) {
+		obj, ok := v.(*jsonx.Obj)
+		if !ok {
+			return 0, false
+		}
+		if ec, ok := objNum(obj, "exit_code"); ok {
+			return int(ec), true
+		}
+		if rc, ok := objNum(obj, "returncode"); ok {
+			return int(rc), true
+		}
+		return 0, false
+	}
+	if ec, ok := read(output); ok {
+		return ec, true
+	}
+	if parsed, err := jsonx.ParseString(ExtractText(output)); err == nil {
+		return read(parsed)
+	}
+	return 0, false
 }
 
 // extractCommand extracts the command string from tool_input, or "" if absent.

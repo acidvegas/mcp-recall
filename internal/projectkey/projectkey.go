@@ -6,7 +6,9 @@ package projectkey
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -37,10 +39,32 @@ func resolvePath(cwd string) string {
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	cmd.Dir = cwd
 	out, err := cmd.Output()
+
+	// The fallback is absolutised rather than used verbatim. cwd arrives from a
+	// hook payload that is only cast, never validated, so it can be relative or
+	// "" — and this value is recorded as project_path, which `mcprecall gc` uses
+	// to decide whether a project still exists. A relative path there is
+	// un-rootable: it reads as "parent survived, project deleted" and would get
+	// the database removed. filepath.Abs("") yields the process cwd — plausible
+	// rather than certain, but absolute and therefore reasoned about honestly
+	// downstream.
+	//
+	// git's --show-toplevel output is already absolute and normalised, and is
+	// left untouched: passing it through Abs could alter the string for some
+	// paths and re-key every existing git project's database.
 	resolved := cwd
 	if err == nil {
 		if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
 			resolved = trimmed
+		}
+	}
+	if resolved != "" && !filepath.IsAbs(resolved) {
+		if abs, absErr := filepath.Abs(resolved); absErr == nil {
+			resolved = abs
+		}
+	} else if resolved == "" {
+		if wd, wdErr := os.Getwd(); wdErr == nil {
+			resolved = wd
 		}
 	}
 

@@ -63,6 +63,11 @@ const schema = `
   CREATE TABLE IF NOT EXISTS sessions (
     date TEXT PRIMARY KEY
   );
+
+  CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
 `
 
 // migrations are columns added after the initial schema — applied once,
@@ -74,6 +79,9 @@ var migrations = []string{
 	"ALTER TABLE stored_outputs ADD COLUMN input_hash TEXT",
 	"ALTER TABLE stored_outputs ADD COLUMN output_hash TEXT",
 	"CREATE INDEX IF NOT EXISTS idx_so_output_hash ON stored_outputs(project_key, output_hash)",
+	// Whether the verbatim body is persisted (1) or the row is summary-only (0).
+	// Existing rows all have bodies, so default 1. See store.retention.
+	"ALTER TABLE stored_outputs ADD COLUMN full_retained INTEGER NOT NULL DEFAULT 1",
 }
 
 // DefaultDBPath returns the SQLite path for a project. Respects RECALL_DB_PATH;
@@ -84,6 +92,17 @@ func DefaultDBPath(projectKey string) string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".local", "share", "mcp-recall", projectKey+".db")
+}
+
+// DataDir returns the directory holding per-project databases. When
+// RECALL_DB_PATH overrides to a single file, returns its parent directory so
+// callers that scan the store (e.g. gc) operate on the right location.
+func DataDir() string {
+	if p := os.Getenv("RECALL_DB_PATH"); p != "" {
+		return filepath.Dir(p)
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "mcp-recall")
 }
 
 // Open opens (creating if needed) the SQLite database at path, applies pragmas,

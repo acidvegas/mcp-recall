@@ -26,7 +26,7 @@ _mcprecall() {
   COMPREPLY=()
   cur="${COMP_WORDS[COMP_CWORD]}"
 
-  local commands="install uninstall status server profiles learn import completions --help --version"
+  local commands="install uninstall status server gc profiles learn import completions --help --version"
   local profiles_cmds="list available info install update remove seed feed check retrain test"
 
   if [[ ${COMP_CWORD} -eq 1 ]]; then
@@ -112,6 +112,7 @@ _mcprecall() {
         'install:register hooks and MCP server in Claude Code'
         'uninstall:remove hooks and MCP server'
         'status:show current configuration and health'
+        'gc:reclaim disk from orphaned project databases'
         'server:run the recall MCP server'
         'profiles:manage compression profiles'
         'learn:generate profile suggestions from installed MCPs'
@@ -138,11 +139,12 @@ _mcprecall "$@"
 const fishCompletion = `# mcprecall fish completions
 # Save to: mcprecall completions fish > ~/.config/fish/completions/mcprecall.fish
 
-set -l commands install uninstall status server profiles learn import completions
+set -l commands install uninstall status server gc profiles learn import completions
 
 complete -c mcprecall -f -n "not __fish_seen_subcommand_from $commands" -a install -d "Register hooks and MCP server"
 complete -c mcprecall -f -n "not __fish_seen_subcommand_from $commands" -a uninstall -d "Remove hooks and MCP server"
 complete -c mcprecall -f -n "not __fish_seen_subcommand_from $commands" -a status -d "Show configuration and health"
+complete -c mcprecall -f -n "not __fish_seen_subcommand_from $commands" -a gc -d "Reclaim disk from orphaned project databases"
 complete -c mcprecall -f -n "not __fish_seen_subcommand_from $commands" -a server -d "Run the recall MCP server"
 complete -c mcprecall -f -n "not __fish_seen_subcommand_from $commands" -a profiles -d "Manage compression profiles"
 complete -c mcprecall -f -n "not __fish_seen_subcommand_from $commands" -a learn -d "Generate profile suggestions"

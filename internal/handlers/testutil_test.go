@@ -19,3 +19,9 @@ func mustParseT(t *testing.T, s string) any {
 	}
 	return v
 }
+
+// mustCompact JSON-quotes a string for embedding in a test payload.
+func mustCompact(t *testing.T, s string) string {
+	t.Helper()
+	return jsonx.Compact(s)
+}

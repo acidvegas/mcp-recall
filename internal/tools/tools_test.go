@@ -99,6 +99,27 @@ func TestRetrieveBasics(t *testing.T) {
 	hasT(t, Retrieve(d, RetrieveArgs{ID: s2.ID, Query: "x", MaxBytes: 100}), "truncated")
 }
 
+// A summary-only row (store.retention) has no body or chunks: full/peek must
+// say so rather than return an empty result.
+func TestRetrieveSummaryOnlyRow(t *testing.T) {
+	d := setup(t)
+	in := baseInput()
+	zero := 0
+	in.FullRetained = &zero
+	s := store(t, d, in)
+
+	for _, mode := range []string{"full", "peek"} {
+		r := Retrieve(d, RetrieveArgs{ID: s.ID, Mode: mode})
+		hasT(t, r, "was not retained")
+		hasT(t, r, in.Summary)
+	}
+	// summary mode is unaffected — that content is still there.
+	sum := Retrieve(d, RetrieveArgs{ID: s.ID, Mode: "summary"})
+	if strings.Contains(sum, "was not retained") {
+		t.Errorf("summary mode should not warn:\n%s", sum)
+	}
+}
+
 func TestRetrieveAccessAndFTS(t *testing.T) {
 	d := setup(t)
 	s := store(t, d, baseInput())
@@ -390,13 +411,49 @@ func TestStats(t *testing.T) {
 	in2.Summary = strings.Repeat("y", 50)
 	store(t, d, in2)
 	r := Stats(d, projectKey, StatsArgs{})
-	hasT(t, r, "Items stored:      2")
+	hasT(t, r, "Intercepted items: 2")
 	hasT(t, r, "reduction")
 	hasT(t, r, "Tokens saved")
 
 	db.RecordSession(d, "2026-03-01")
 	db.RecordSession(d, "2026-02-28")
 	hasT(t, Stats(d, projectKey, StatsArgs{}), "Session days:      2")
+}
+
+// recall__note memory is stored memory, not interception: it must not count
+// toward the savings figures, and is reported on its own line instead.
+func TestStatsExcludesNotesFromSavings(t *testing.T) {
+	d := setup(t)
+	in := baseInput()
+	in.OriginalSize = 10000
+	in.Summary = strings.Repeat("x", 100)
+	store(t, d, in)
+
+	note := baseInput()
+	note.ToolName = "recall__note"
+	note.OriginalSize = 900000
+	note.Summary = strings.Repeat("n", 900000)
+	note.FullContent = strings.Repeat("n", 900000)
+	store(t, d, note)
+
+	r := Stats(d, projectKey, StatsArgs{})
+	hasT(t, r, "Intercepted items: 1")
+	hasT(t, r, "Notes/memory:      1 item")
+	if strings.Contains(r, "0.0% reduction") {
+		t.Errorf("note bytes diluted the compression ratio:\n%s", r)
+	}
+}
+
+// A store holding only notes still reports, rather than claiming no data.
+func TestStatsNotesOnly(t *testing.T) {
+	d := setup(t)
+	note := baseInput()
+	note.ToolName = "recall__note"
+	store(t, d, note)
+
+	r := Stats(d, projectKey, StatsArgs{})
+	hasT(t, r, "Intercepted items: 0 (no tool output compressed yet)")
+	hasT(t, r, "Notes/memory:      1 item")
 }
 
 func TestStatsSuggestions(t *testing.T) {

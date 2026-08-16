@@ -4,6 +4,7 @@
 package profiles
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -461,6 +462,16 @@ func cmdInfo(args []string) {
 	fmt.Print("Fetching manifest… ")
 	entries, err := fetchManifest(false)
 	if err != nil {
+		// A verification failure must not be masked as "offline": in `error`
+		// mode it means the manifest could not be trusted, so hard-fail like
+		// the write commands do (#234). A genuine network/fetch error still
+		// degrades to the local-only view.
+		var verr *ManifestVerificationError
+		if errors.As(err, &verr) {
+			fmt.Println()
+			fmt.Fprintln(os.Stderr, verr.Error())
+			os.Exit(1)
+		}
 		fmt.Println("(offline — showing local data only)")
 	} else {
 		fmt.Println("done")

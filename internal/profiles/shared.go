@@ -25,6 +25,28 @@ const (
 	manifestURL    = "https://raw.githubusercontent.com/sakebomb/mcp-recall-profiles/main/manifest.json"
 	profileBaseURL = "https://raw.githubusercontent.com/sakebomb/mcp-recall-profiles/main/"
 	communityRepo  = "sakebomb/mcp-recall-profiles"
+
+	signerWorkflowPath = ".github/workflows/manifest.yml"
+	signerRef          = "refs/heads/main"
+
+	// signerIdentity is the exact signing identity we accept for the manifest,
+	// matched against the certificate's SubjectAlternativeName.
+	//
+	// Repo scope alone is too weak: it accepts an attestation from *any*
+	// workflow in communityRepo, so any workflow there able to obtain an OIDC
+	// token could mint a trust root we would honour.
+	//
+	// --signer-workflow is not sufficient either: it compiles to a
+	// prefix-anchored SAN match with no terminator, so a truncated
+	// ".../workflows/man" also passes, and since the real SAN is
+	// ".../manifest.yml@refs/heads/<ref>" the prefix stops short of the ref —
+	// an attestation signed from any branch still matches. --cert-identity
+	// matches the whole SAN exactly, which pins the ref too.
+	//
+	// Deliberately strict: if that workflow ever attests from a tag or a
+	// renamed default branch, verification fails loudly rather than silently
+	// widening what we trust.
+	signerIdentity = "https://github.com/" + communityRepo + "/" + signerWorkflowPath + "@" + signerRef
 )
 
 var (
@@ -130,25 +152,69 @@ func first8(s string) string {
 	return s
 }
 
-// verifyManifest shells out to `gh attestation verify`, degrading gracefully.
+// ManifestVerificationError marks a manifest that could not be trusted, as
+// opposed to one that could not be fetched. Callers that degrade to a
+// local-only view on a network error must still hard-fail on this (#234).
+type ManifestVerificationError struct{ msg string }
+
+func (e *ManifestVerificationError) Error() string { return e.msg }
+
+// unsupportedFlagRe matches the stderr shapes gh uses when it doesn't
+// recognise a flag we pass.
+var unsupportedFlagRe = regexp.MustCompile(`(?i)unknown (flag|command|shorthand flag)`)
+
+// reportUnavailable handles a verification that could not run — gh absent from
+// PATH, or too old for the flags we pin with. That is a tooling gap, not
+// evidence of tampering, so its diagnosis must never collapse into the
+// "signature did not verify" message.
+//
+// In "error" mode verification is mandatory (#208): "error" means verification
+// must *succeed*, so an unavailable verifier is fatal. "warn" logs the gap and
+// proceeds. --skip-verify is the documented escape hatch and is named in the
+// failure so it is actionable.
+func reportUnavailable(mode, reason string) error {
+	if mode == "error" {
+		return &ManifestVerificationError{msg: fmt.Sprintf(
+			"[recall] manifest signature cannot be verified: %s. "+
+				`verify_signature = "error" requires verification to succeed — `+
+				"install or upgrade gh, or pass --skip-verify to proceed without it.", reason)}
+	}
+	fmt.Fprintf(os.Stderr, "[recall] manifest signature verification skipped: %s\n", reason)
+	return nil
+}
+
+// verifyManifest shells out to `gh attestation verify`, degrading gracefully if
+// gh is absent or too old to support the flags we pin with.
 func verifyManifest(manifestPath, mode string) error {
 	if mode == "skip" {
 		return nil
 	}
 	if exec.Command("gh", "--version").Run() != nil {
-		fmt.Fprintln(os.Stderr, "[recall] manifest signature verification skipped: gh CLI not found in PATH")
-		return nil
+		return reportUnavailable(mode, "gh CLI not found in PATH")
 	}
-	cmd := exec.Command("gh", "attestation", "verify", manifestPath, "--repo", communityRepo)
+	cmd := exec.Command("gh", "attestation", "verify", manifestPath,
+		"--repo", communityRepo,
+		"--cert-identity", signerIdentity)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		errText := strings.TrimSpace(stderr.String())
+
+		// A gh too old for these flags exits non-zero just like a bad signature
+		// does. Reporting that as "verification failed" would read as a tampered
+		// manifest, so treat it as the tooling gap it is. Covers both an unknown
+		// --cert-identity and, on older still, no `attestation` subcommand at
+		// all; the remedy is the same either way.
+		if unsupportedFlagRe.MatchString(errText) {
+			return reportUnavailable(mode, "this gh CLI does not support the flags we verify with (upgrade gh)")
+		}
+
 		msg := "[recall] manifest signature verification failed"
-		if s := strings.TrimSpace(stderr.String()); s != "" {
-			msg += ": " + s
+		if errText != "" {
+			msg += ": " + errText
 		}
 		if mode == "error" {
-			return fmt.Errorf("%s", msg)
+			return &ManifestVerificationError{msg: msg}
 		}
 		fmt.Fprintln(os.Stderr, msg)
 	}

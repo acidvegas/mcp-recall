@@ -56,7 +56,7 @@ func TestImportRoundTripAndOrdering(t *testing.T) {
 	a.CreatedAt = 1000
 	b := mkRow("recall_bbbbbbbbbbbbbbb2", "mcp__github__get_issue", "Issue #2", `[{"number":2}]`)
 	b.CreatedAt = 2000
-	res := importItems(dbPath, []importRow{a, b}, false, "") // keep-project-key
+	res := importItems(dbPath, []importRow{a, b}, false, "current_project_key")
 	if res.imported != 2 {
 		t.Fatalf("imported = %d", res.imported)
 	}
@@ -66,18 +66,28 @@ func TestImportRoundTripAndOrdering(t *testing.T) {
 	}
 }
 
-func TestImportProjectKeyRemapAndKeep(t *testing.T) {
-	// remap (targetKey = pk)
-	p1 := filepath.Join(t.TempDir(), "t.db")
-	importItems(p1, []importRow{mkRow("recall_1111111111111111", "mcp__x", "s", "c")}, false, "current_project_key")
-	if got := query(t, p1, "SELECT project_key FROM stored_outputs LIMIT 1"); got[0][0] == srcProject {
-		t.Error("default should remap project key")
+// Every imported row is stamped with the current project's key, never the
+// dump's — otherwise it lands in this project's database but is invisible to
+// every project-scoped path (#226).
+func TestImportAlwaysStampsCurrentProjectKey(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "t.db")
+	importItems(p, []importRow{mkRow("recall_1111111111111111", "mcp__x", "s", "c")}, false, "current_project_key")
+	got := query(t, p, "SELECT project_key FROM stored_outputs LIMIT 1")
+	if got[0][0] != "current_project_key" {
+		t.Errorf("project key = %v, want current_project_key", got[0][0])
 	}
-	// keep (targetKey = "")
-	p2 := filepath.Join(t.TempDir(), "t.db")
-	importItems(p2, []importRow{mkRow("recall_2222222222222222", "mcp__x", "s", "c")}, false, "")
-	if got := query(t, p2, "SELECT project_key FROM stored_outputs LIMIT 1"); got[0][0] != srcProject {
-		t.Errorf("--keep-project-key should preserve: %v", got[0][0])
+}
+
+func TestKeepProjectKeyFlagRejected(t *testing.T) {
+	msg := keepProjectKeyRejection([]string{"dump.json", "--keep-project-key"})
+	if msg == "" {
+		t.Fatal("--keep-project-key should be rejected")
+	}
+	if !strings.Contains(msg, "#226") {
+		t.Errorf("rejection should cite the issue: %q", msg)
+	}
+	if keepProjectKeyRejection([]string{"dump.json", "--overwrite"}) != "" {
+		t.Error("unrelated flags should not be rejected")
 	}
 }
 
@@ -85,7 +95,7 @@ func TestImportPreservesPinAndFTS(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "t.db")
 	r := mkRow("recall_3333333333333333", "mcp__github__list_issues", "Issue", "The quick brown fox jumps over the lazy dog")
 	r.Pinned = 1
-	importItems(p, []importRow{r}, false, "")
+	importItems(p, []importRow{r}, false, "current_project_key")
 	if got := query(t, p, "SELECT pinned FROM stored_outputs WHERE id = ?", r.ID); got[0][0].(int64) != 1 {
 		t.Errorf("pin not preserved: %v", got[0][0])
 	}
@@ -98,11 +108,11 @@ func TestImportPreservesPinAndFTS(t *testing.T) {
 func TestImportSkipAndOverwrite(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "t.db")
 	r := mkRow("recall_4444444444444444", "mcp__x", "Issue #1", "original content")
-	importItems(p, []importRow{r}, false, "")
+	importItems(p, []importRow{r}, false, "current_project_key")
 
 	// skip existing by default (mutated summary should NOT apply)
 	r.Summary = "UPDATED"
-	res := importItems(p, []importRow{r}, false, "")
+	res := importItems(p, []importRow{r}, false, "current_project_key")
 	if res.skipped != 1 {
 		t.Errorf("expected skip, got %+v", res)
 	}
@@ -113,7 +123,7 @@ func TestImportSkipAndOverwrite(t *testing.T) {
 	// overwrite replaces + refreshes chunks (no stale "original")
 	r.Summary = "OVERWRITTEN"
 	r.FullContent = "replacement content"
-	res2 := importItems(p, []importRow{r}, true, "")
+	res2 := importItems(p, []importRow{r}, true, "current_project_key")
 	if res2.overwritten != 1 {
 		t.Errorf("expected overwrite, got %+v", res2)
 	}
@@ -139,7 +149,7 @@ func TestImportDryRunCounts(t *testing.T) {
 		t.Errorf("dry-run on missing db: %+v", r)
 	}
 	// after a real import, dry-run counts skips
-	importItems(p, items, false, "")
+	importItems(p, items, false, "current_project_key")
 	if r := dryRunCount(p, items, false); r.skipped != 2 {
 		t.Errorf("dry-run skip count: %+v", r)
 	}

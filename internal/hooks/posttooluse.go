@@ -19,6 +19,7 @@ import (
 	"mcprecall/internal/jsonx"
 	"mcprecall/internal/logx"
 	"mcprecall/internal/projectkey"
+	"mcprecall/internal/retention"
 	"mcprecall/internal/secrets"
 )
 
@@ -119,7 +120,23 @@ func HandlePostToolUse(raw string) HookOutput {
 		return HookOutput{}
 	}
 
-	// 7. Store
+	// 7. Store. Retention policy decides whether to keep the verbatim body or
+	//    store the row summary-only (store.retention). The command drives the
+	//    balanced-tier classification for Bash; outputHash (computed above from
+	//    the real content) is passed through so dedup works even when the body is
+	//    dropped.
+	command := ""
+	if hasInput {
+		if in, ok := toolInput.(*jsonx.Obj); ok {
+			command, _ = in.Str("command")
+		}
+	}
+	fullRetained := 1
+	if !retention.ShouldRetainFullBody(cfg.Store.Retention, toolName, command) {
+		fullRetained = 0
+		logx.Debug(fmt.Sprintf("summary-only · %s · retention=%s", toolName, cfg.Store.Retention))
+	}
+
 	stored, err := db.StoreOutput(database, db.StoreInput{
 		ProjectKey:   projectKey,
 		SessionID:    sessionID,
@@ -129,6 +146,7 @@ func HandlePostToolUse(raw string) HookOutput {
 		OriginalSize: res.OriginalSize,
 		InputHash:    inputHash,
 		OutputHash:   &outputHash, // reuse the hash computed above
+		FullRetained: &fullRetained,
 	})
 	if err != nil {
 		logx.Error("post-tool-use store failed: " + err.Error())

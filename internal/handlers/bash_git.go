@@ -288,3 +288,123 @@ func moreSuffix(total, shown int) string {
 	}
 	return ""
 }
+
+// ── git branch / stash list / remote -v — long ref listings ───────────────────
+
+const maxRefs = 25
+
+var (
+	stashEntryRe   = regexp.MustCompile(`^stash@\{\d+\}:`)
+	remoteKindRe   = regexp.MustCompile(`\((fetch|push)\)\s*$`)
+	remoteFetchRe  = regexp.MustCompile(`^(\S+)\s+(\S+)\s+\(fetch\)`)
+	branchMarkerRe = regexp.MustCompile(`^[*+]?\s*`)
+	whitespaceRe   = regexp.MustCompile(`\s`)
+)
+
+func gitRefsHandler(toolName string, output any) Result {
+	stdout := extractStdout(output)
+	originalSize := byteLen(ExtractText(output))
+	var lines []string
+	for _, l := range strings.Split(stdout, "\n") {
+		if strings.TrimSpace(l) != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) == 0 {
+		return shellHandler(toolName, output)
+	}
+
+	refLines := func(header string, items []string, width int) Result {
+		out := []string{header}
+		for i, l := range items {
+			if i >= maxRefs {
+				break
+			}
+			out = append(out, "  "+firstChars(strings.TrimSpace(l), width))
+		}
+		if len(items) > maxRefs {
+			out = append(out, fmt.Sprintf("  … (+%d more)", len(items)-maxRefs))
+		}
+		return Result{Summary: strings.Join(out, "\n"), OriginalSize: originalSize}
+	}
+
+	// git stash list: "stash@{0}: WIP on ..."
+	stashes := 0
+	for _, l := range lines {
+		if stashEntryRe.MatchString(strings.TrimSpace(l)) {
+			stashes++
+		}
+	}
+	if stashes >= ceilHalf(len(lines)) {
+		word := "entries"
+		if len(lines) == 1 {
+			word = "entry"
+		}
+		return refLines(fmt.Sprintf("git stash — %d %s", len(lines), word), lines, 100)
+	}
+
+	// git remote -v: "origin\tgit@...\t(fetch)"
+	kinds := 0
+	for _, l := range lines {
+		if remoteKindRe.MatchString(l) {
+			kinds++
+		}
+	}
+	if kinds >= ceilHalf(len(lines)) {
+		var names []string
+		urls := map[string]string{}
+		for _, l := range lines {
+			if m := remoteFetchRe.FindStringSubmatch(l); m != nil {
+				if _, seen := urls[m[1]]; !seen {
+					names = append(names, m[1])
+				}
+				urls[m[1]] = m[2]
+			}
+		}
+		out := []string{fmt.Sprintf("git remote — %d %s", len(names), plural(len(names), "remote", "remotes"))}
+		for i, n := range names {
+			if i >= maxRefs {
+				break
+			}
+			out = append(out, fmt.Sprintf("  %s → %s", n, firstChars(urls[n], 80)))
+		}
+		if len(names) > maxRefs {
+			out = append(out, fmt.Sprintf("  … (+%d more)", len(names)-maxRefs))
+		}
+		return Result{Summary: strings.Join(out, "\n"), OriginalSize: originalSize}
+	}
+
+	// git branch: "* main" / "  feat/x" / "  remotes/origin/y". A branch line is
+	// the leading marker (`* `/`+ `/spaces) followed by a single whitespace-free ref.
+	var branchLines []string
+	remotes := 0
+	for _, l := range lines {
+		ref := strings.TrimSpace(branchMarkerRe.ReplaceAllString(l, ""))
+		if ref == "" || whitespaceRe.MatchString(ref) {
+			continue
+		}
+		branchLines = append(branchLines, l)
+		if strings.Contains(l, "remotes/") {
+			remotes++
+		}
+	}
+	if len(branchLines) >= ceilHalf(len(lines)) {
+		current := ""
+		for _, l := range lines {
+			if strings.HasPrefix(strings.TrimLeft(l, " \t"), "* ") {
+				current = strings.TrimSpace(strings.TrimPrefix(strings.TrimLeft(l, " \t"), "*"))
+				break
+			}
+		}
+		header := fmt.Sprintf("git branch — %d local", len(branchLines)-remotes)
+		if remotes > 0 {
+			header += fmt.Sprintf(", %d remote", remotes)
+		}
+		if current != "" {
+			header += fmt.Sprintf(" (on %s)", current)
+		}
+		return refLines(header, branchLines, 80)
+	}
+
+	return shellHandler(toolName, output)
+}
