@@ -12,10 +12,11 @@
 //
 // Default is a dry run — nothing is deleted without --force. Deletion is
 // conservative: only DBs whose project was definitively removed (the recorded
-// path is gone but its parent still exists) or pathless DBs untouched past the
-// stale window are candidates. A path missing because its whole volume is
-// unmounted, a recorded path we cannot reason about (relative, so un-rootable),
-// a non-mcp-recall .db, or a corrupt DB is never a candidate.
+// path is gone but its parent still exists), or DBs we cannot attribute to a
+// live project that are also untouched past the stale window (pathless legacy
+// DBs, or an un-rootable relative recorded path), are candidates. A path missing
+// because its whole volume is unmounted (absolute, so it may return intact), a
+// non-mcp-recall .db, or a corrupt DB is never a candidate.
 package gc
 
 import (
@@ -29,7 +30,6 @@ import (
 	"strings"
 	"time"
 
-	"mcprecall/internal/db"
 	"mcprecall/internal/format"
 	"mcprecall/internal/logx"
 )
@@ -60,10 +60,15 @@ const (
 	// StatusOrphaned means the recorded path is gone but its parent exists —
 	// the project was deleted, so the DB is safe to remove.
 	StatusOrphaned Status = "orphaned"
-	// StatusUnverifiable means it cannot be reasoned about: path AND parent gone
-	// (likely an unmounted volume), or a relative path with no knowable root.
-	// Never deleted.
+	// StatusUnverifiable means path AND parent gone (likely an unmounted volume,
+	// which may return intact) — deletion can't be confirmed. Never deleted.
 	StatusUnverifiable Status = "unverifiable"
+	// StatusUnrootedFresh means an un-rootable recorded path (relative/empty),
+	// recently modified — kept.
+	StatusUnrootedFresh Status = "unrooted-fresh"
+	// StatusUnrootedStale means an un-rootable recorded path (relative/empty),
+	// untouched past the stale window — a candidate (upstream #214).
+	StatusUnrootedStale Status = "unrooted-stale"
 	// StatusLegacyFresh means no recorded path, recently modified — kept.
 	StatusLegacyFresh Status = "legacy-fresh"
 	// StatusLegacyStale means no recorded path, untouched past the stale window.
@@ -79,13 +84,15 @@ type policy struct{ deletable, vacuumable bool }
 // constant must appear here; statusPolicyFor panics on a missing entry so a new
 // status can never be silently treated as deletable or vacuumable.
 var statusPolicy = map[Status]policy{
-	StatusCurrent:      {deletable: false, vacuumable: false},
-	StatusActive:       {deletable: false, vacuumable: true},
-	StatusOrphaned:     {deletable: true, vacuumable: false},
-	StatusUnverifiable: {deletable: false, vacuumable: false},
-	StatusLegacyFresh:  {deletable: false, vacuumable: true},
-	StatusLegacyStale:  {deletable: true, vacuumable: false},
-	StatusUnreadable:   {deletable: false, vacuumable: false},
+	StatusCurrent:       {deletable: false, vacuumable: false},
+	StatusActive:        {deletable: false, vacuumable: true},
+	StatusOrphaned:      {deletable: true, vacuumable: false},
+	StatusUnverifiable:  {deletable: false, vacuumable: false},
+	StatusUnrootedFresh: {deletable: false, vacuumable: true},
+	StatusUnrootedStale: {deletable: true, vacuumable: false},
+	StatusLegacyFresh:   {deletable: false, vacuumable: true},
+	StatusLegacyStale:   {deletable: true, vacuumable: false},
+	StatusUnreadable:    {deletable: false, vacuumable: false},
 }
 
 func statusPolicyFor(s Status) policy {
@@ -189,6 +196,7 @@ func ReminderText(fp Footprint, reminderMB float64) string {
 // probe holds a database's classification inputs.
 type probe struct {
 	readable    bool // opened AND is an mcp-recall DB we could read
+	hasPath     bool // a project_path row exists, even an empty one
 	projectPath string
 	items       int
 }
@@ -216,15 +224,18 @@ func probeDB(file string) probe {
 	}
 
 	// A missing meta table is a legitimate legacy database, not corruption, so
-	// its error is swallowed into an empty path rather than failing the probe.
-	projectPath, _ := db.GetMeta(database, "project_path")
+	// its error is swallowed into "no recorded path" rather than failing the
+	// probe. Read directly rather than via db.GetMeta so a recorded "" stays
+	// distinct from no row, as upstream's null vs "" does.
+	var projectPath string
+	hasPath := database.QueryRow(`SELECT value FROM meta WHERE key = 'project_path'`).Scan(&projectPath) == nil
 
 	var items int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM stored_outputs`).Scan(&items); err != nil {
 		// A failure here means real corruption, not just a missing table.
 		return probe{}
 	}
-	return probe{readable: true, projectPath: projectPath, items: items}
+	return probe{readable: true, hasPath: hasPath, projectPath: projectPath, items: items}
 }
 
 // classify determines one database's status. Split out for exhaustive, testable
@@ -233,15 +244,20 @@ func classify(p probe, modTime, staleCutoff time.Time) Status {
 	if !p.readable {
 		return StatusUnreadable
 	}
-	if p.projectPath != "" {
+	if p.hasPath {
 		// Checked before any existence test: a relative path is resolved against
 		// whatever cwd gc happens to run from, so it would otherwise classify
 		// differently per invocation — and "." or a bare name would read as
 		// "parent survived, project deleted" (its dir is ".", which always
 		// exists) and be destroyed. We cannot know where a relative path was
-		// rooted, so it is the can't-verify case.
+		// rooted, so it is never deleted on a deleted-project inference — but it
+		// should not stay pinned forever either (upstream #214): it falls through
+		// to the untouched-past-the-stale-window rule used for pathless DBs.
 		if !filepath.IsAbs(p.projectPath) {
-			return StatusUnverifiable
+			if modTime.Before(staleCutoff) {
+				return StatusUnrootedStale
+			}
+			return StatusUnrootedFresh
 		}
 		if pathExists(p.projectPath) {
 			return StatusActive
@@ -292,17 +308,18 @@ func ScanDatabases(dir, currentFile string, staleDays int, now time.Time) []Entr
 		}
 		size := dbFootprint(file)
 
-		if resolvePath(file) == currentResolved {
-			entries = append(entries, Entry{
-				File: file, Status: StatusCurrent, SizeBytes: size, ModTime: fi.ModTime(),
-			})
-			continue
-		}
-
+		// The active project's DB is always current — never deletable, never
+		// vacuumed — whatever the probe returns. It is still probed so the report
+		// shows its real path and item count (upstream #265): a live WAL DB reads
+		// fine through a second read-only connection.
 		p := probeDB(file)
+		status := classify(p, fi.ModTime(), staleCutoff)
+		if resolvePath(file) == currentResolved {
+			status = StatusCurrent
+		}
 		entries = append(entries, Entry{
 			File:        file,
-			Status:      classify(p, fi.ModTime(), staleCutoff),
+			Status:      status,
 			ProjectPath: p.projectPath,
 			SizeBytes:   size,
 			ModTime:     fi.ModTime(),
@@ -324,13 +341,15 @@ func resolvePath(p string) string {
 }
 
 var statusLabel = map[Status]string{
-	StatusCurrent:      "current",
-	StatusActive:       "active",
-	StatusOrphaned:     "ORPHANED",
-	StatusUnverifiable: "unverifiable",
-	StatusLegacyFresh:  "legacy",
-	StatusLegacyStale:  "LEGACY-STALE",
-	StatusUnreadable:   "unreadable",
+	StatusCurrent:       "current",
+	StatusActive:        "active",
+	StatusOrphaned:      "ORPHANED",
+	StatusUnverifiable:  "unverifiable",
+	StatusUnrootedFresh: "unrooted",
+	StatusUnrootedStale: "UNROOTED-STALE",
+	StatusLegacyFresh:   "legacy",
+	StatusLegacyStale:   "LEGACY-STALE",
+	StatusUnreadable:    "unreadable",
 }
 
 func padEnd(s string, n int) string {
@@ -358,7 +377,7 @@ func reportLine(e Entry, now time.Time) string {
 		where = "(no recorded path)"
 	}
 	return fmt.Sprintf("  %s %s %s  %s items  %s  %s\n      %s",
-		flag, padEnd(statusLabel[e.Status], 13), padStart(format.Bytes(int(e.SizeBytes)), 9),
+		flag, padEnd(statusLabel[e.Status], 14), padStart(format.Bytes(int(e.SizeBytes)), 9),
 		padStart(fmt.Sprintf("%d", e.Items), 6), padEnd(age, 14), filepath.Base(e.File), where)
 }
 
@@ -450,8 +469,9 @@ func Run(w io.Writer, dir, currentFile string, opts Options, now time.Time) {
 	fmt.Fprintf(w, "\n%d databases · %s total · %d reclaimable (%s)\n",
 		len(entries), format.Bytes(int(sumBytes(entries))),
 		len(candidates), format.Bytes(int(sumBytes(candidates))))
-	fmt.Fprintf(w, "  ORPHANED = project path deleted · LEGACY-STALE = no recorded path, "+
-		"untouched > %dd (--stale-days N) · unverifiable/unreadable are never deleted\n", staleDays)
+	fmt.Fprintf(w, "  ORPHANED = project path deleted · LEGACY-STALE = no recorded path · "+
+		"UNROOTED-STALE = un-rootable relative path — both untouched > %dd (--stale-days N) · "+
+		"unverifiable (unmounted volume) / unreadable are never deleted\n", staleDays)
 
 	if opts.DryRun {
 		if len(candidates) > 0 {

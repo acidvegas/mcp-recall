@@ -14,6 +14,7 @@ import (
 	"mcprecall/internal/db"
 	"mcprecall/internal/format"
 	"mcprecall/internal/jsonx"
+	"mcprecall/internal/secrets"
 )
 
 // ContextEmptyResponse is returned when there is nothing to show / inject.
@@ -330,6 +331,15 @@ type NoteArgs struct {
 }
 
 func Note(database *sql.DB, projectKey string, args NoteArgs) string {
+	// recall__note never passes through the PostToolUse hook (mcp__recall__* is
+	// denylisted there), so the hook's secret scan never sees note text — scan
+	// here or nothing does (upstream #271). Refuse rather than redact, and name
+	// the patterns only, never the matched value.
+	if names := secrets.Find(args.Title + "\n" + args.Text); len(names) > 0 {
+		return fmt.Sprintf("[recall: note NOT stored — detected %s. Remove the credential and retry, "+
+			"or store a reference to it instead of the value.]", strings.Join(names, ", "))
+	}
+
 	title := args.Title
 	if title == "" {
 		title = "(note)"

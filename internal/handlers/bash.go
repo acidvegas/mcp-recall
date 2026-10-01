@@ -371,17 +371,31 @@ var (
 	cmdLs   = regexp.MustCompile(`^ls(\s|$)`)
 	cmdFind = regexp.MustCompile(`^(find|fd)(\s|$)`)
 
-	cdPrefixRe    = regexp.MustCompile(`(?s)^cd\s+[^\s&;]+\s*(?:&&|;)\s*(.+)$`)
+	// A leading `cd <dir>` prefix up to and including its separator: `&&`, `;`,
+	// or a bare newline — multi-line calls written as `cd <dir>` then the real
+	// command are routine, and treating that as the command `cd` sent it to the
+	// generic fallback (upstream #260). The dir may be double- or single-quoted
+	// or contain backslash-escaped whitespace; an unquoted run stops at
+	// whitespace or a shell operator so it can't swallow the separator. A bare
+	// `cd <dir>` with no following command does not match.
+	cdPrefixRe    = regexp.MustCompile(`(?s)^cd\s+(?:"[^"]*"|'[^']*'|(?:\\[\s\S]|[^\s\\&;|<>])+)[ \t]*(?:&&|;|\r?\n)\s*(.+)$`)
 	gitGlobalOpts = regexp.MustCompile(`^git\s+(?:(?:--no-pager|--paginate|-P)\s+|-[cC]\s+\S+\s+)+`)
 )
 
 // NormalizeCommand normalises a Bash command so routing sees the real
-// subcommand: it unwraps a leading `cd <dir> && …` and strips git global options
-// (--no-pager, -C <path>, -c <k=v>, --paginate, -P) that would otherwise push
-// `git diff` output to the generic shell fallback.
+// subcommand: it unwraps leading `cd <dir>` prefixes (see cdPrefixRe for the
+// separator and quoting shapes) and strips git global options (--no-pager,
+// -C <path>, -c <k=v>, --paginate, -P) that would otherwise push `git diff`
+// output to the generic shell fallback. Chained prefixes across mixed
+// separators (`cd /a && cd /b\ngit diff`) are unwrapped up to 4 hops, as
+// upstream bounds it.
 func NormalizeCommand(command string) string {
 	c := strings.TrimSpace(command)
-	if m := cdPrefixRe.FindStringSubmatch(c); m != nil {
+	for i := 0; i < 4; i++ {
+		m := cdPrefixRe.FindStringSubmatch(c)
+		if m == nil {
+			break
+		}
 		c = strings.TrimSpace(m[1])
 	}
 	return gitGlobalOpts.ReplaceAllString(c, "git ")

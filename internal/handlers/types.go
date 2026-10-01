@@ -21,37 +21,25 @@ type Result struct {
 type Handler func(toolName string, output any) Result
 
 // ExtractText extracts plain text from an MCP tool result. MCP results arrive
-// as {content: [{type:"text", text:"..."}, ...]}. Falls back to JSON
-// serialization for unrecognized shapes. Ports extractText.
+// as {content: [{type:"text", text:"..."}, ...]} or as a top-level
+// content-block array, either possibly as a JSON string. Image, audio and
+// resource blocks are dropped so they are never stored or hashed (upstream
+// #270). A text-only top-level array is left serialized so jsonHandler routing
+// is unchanged. Falls back to JSON serialization for unrecognized shapes.
+// Ports extractText.
 func ExtractText(output any) string {
+	if blocks := asContentBlocks(output); blocks != nil {
+		text := joinTextBlocks(blocks)
+		// Non-text blocks: never serialize the image bytes into the store.
+		if hasNonText(blocks) {
+			return text
+		}
+		if text != "" && !isTopLevelArrayPayload(output) {
+			return text
+		}
+	}
 	if s, ok := output.(string); ok {
 		return s
-	}
-	if obj, ok := output.(*jsonx.Obj); ok {
-		if c, ok := obj.Get("content"); ok {
-			if arr, ok := c.([]any); ok {
-				var texts []string
-				for _, item := range arr {
-					io, ok := item.(*jsonx.Obj)
-					if !ok {
-						continue
-					}
-					tv, _ := io.Get("type")
-					ts, _ := tv.(string)
-					if ts != "text" {
-						continue
-					}
-					txv, _ := io.Get("text")
-					if tx, ok := txv.(string); ok {
-						texts = append(texts, tx)
-					}
-				}
-				joined := strings.Join(texts, "\n")
-				if len(joined) > 0 {
-					return joined
-				}
-			}
-		}
 	}
 	return jsonx.Compact(output)
 }

@@ -82,9 +82,10 @@ var handlerRegistry = []handlerMatcher{
 //  2. user/community profiles
 //  3. typed-handler registry (first match wins)
 //  4. bundled profiles
-//  5. JSON content fallback
-//  6. CSV content fallback
-//  7. generic handler
+//  5. content blocks with non-text → content-block handler (strip images)
+//  6. JSON content fallback
+//  7. CSV content fallback
+//  8. generic handler
 func GetHandler(toolName string, output any, input any) Handler {
 	if toolName == "Bash" {
 		return GetBashHandler(input)
@@ -99,6 +100,13 @@ func GetHandler(toolName string, output any, input any) Handler {
 	}
 	if h := profileHandler(toolName, []string{"bundled"}); h != nil {
 		return h
+	}
+
+	// MCP content blocks that include images/audio: strip them before the JSON
+	// fallback, which does not truncate strings and would store the JPEG
+	// almost verbatim (upstream #270).
+	if hasNonTextContentBlocks(output) {
+		return contentBlockHandler
 	}
 
 	text := ExtractText(output)

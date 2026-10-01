@@ -605,6 +605,41 @@ func TestNote(t *testing.T) {
 	hasT(t, onlyNote(t, d5).Summary, "…")
 }
 
+// recall__note never passes through the PostToolUse hook, so Note scans its own
+// title and text (upstream #271).
+func TestNoteRefusesSecrets(t *testing.T) {
+	secret := "sk-" + strings.Repeat("a1b2c3d4e5f6g7h8", 3)
+	countNotes := func(d *sql.DB) int {
+		var n int
+		d.QueryRow("SELECT COUNT(*) FROM stored_outputs WHERE tool_name = 'recall__note'").Scan(&n)
+		return n
+	}
+
+	d := setup(t)
+	r := Note(d, projectKey, NoteArgs{Text: "the key is " + secret})
+	hasT(t, r, "NOT stored")
+	hasT(t, r, "OpenAI API key")
+	hasNotT(t, r, secret)
+	if n := countNotes(d); n != 0 {
+		t.Errorf("secret note stored: %d rows", n)
+	}
+
+	d2 := setup(t)
+	hasT(t, Note(d2, projectKey, NoteArgs{Text: "harmless body", Title: secret}), "NOT stored")
+	if n := countNotes(d2); n != 0 {
+		t.Errorf("secret title stored: %d rows", n)
+	}
+
+	d3 := setup(t)
+	text := "a perfectly ordinary note about the auth flow"
+	if r := Note(d3, projectKey, NoteArgs{Text: text}); !noteIDRe.MatchString(r) {
+		t.Errorf("clean note refused: %q", r)
+	}
+	if got := onlyNote(t, d3).FullContent; got != text {
+		t.Errorf("full_content = %q", got)
+	}
+}
+
 // ── toolExport ────────────────────────────────────────────────────────────────
 
 func TestExport(t *testing.T) {

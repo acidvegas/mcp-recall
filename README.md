@@ -183,7 +183,7 @@ reports what can be reclaimed.
 ```
 mcprecall gc                      # dry run — report only, nothing deleted
 mcprecall gc --force              # delete the marked databases
-mcprecall gc --stale-days 30      # widen/narrow the legacy window (default 90)
+mcprecall gc --stale-days 30      # widen/narrow the legacy/unrooted window (default 90)
 mcprecall gc --vacuum             # full-VACUUM the databases being kept
 ```
 
@@ -194,7 +194,9 @@ Classification drives a single deletion policy:
 | `current` | the live project's database | never |
 | `active` | recorded path still exists | never |
 | `ORPHANED` | recorded path gone, **parent still exists** — project really deleted | yes |
-| `unverifiable` | path *and* parent gone (likely an unmounted volume), or a relative path with no knowable root | never |
+| `unverifiable` | absolute path *and* parent gone (likely an unmounted volume, which may return intact) | never |
+| `unrooted` | relative recorded path (no knowable root), recently modified | never |
+| `UNROOTED-STALE` | relative recorded path, untouched past `--stale-days` | yes |
 | `legacy` | no recorded path, recently modified | never |
 | `LEGACY-STALE` | no recorded path, untouched past `--stale-days` | yes |
 | `unreadable` | not an mcp-recall database, or corrupt | never |
@@ -203,7 +205,8 @@ Orphan detection needs a recorded `project_path`, which session-start writes on
 each run — and only when it resolves to a real directory, so a bad guess can
 never mark a live project as deleted. Databases predating this stay pathless and
 are reclaimed solely on the untouched-for-N-days rule, never on a
-deleted-project inference.
+deleted-project inference. A relative recorded path can't be rooted against any
+directory, so it gets the same untouched-for-N-days rule instead.
 
 `--vacuum` is orthogonal to `--force`: it rewrites the databases being *kept*,
 which reclaims free pages and upgrades legacy `auto_vacuum=NONE` stores to
@@ -214,7 +217,10 @@ anything unverifiable.
 
 `mcprecall` never persists credentials. Before storing, output is scanned for
 secrets (PEM keys, cloud and API tokens, provider keys, connection strings) and
-storage is skipped if any are found. Tool names associated with password
+storage is skipped if any are found. `recall__note` runs the same scan on its
+title and text and refuses a note that matches, and `import` withholds any dump
+row whose summary or body matches — both report pattern names only, never the
+matched value. Tool names associated with password
 managers and secret stores, and tools whose names imply credential access, are
 denied by default — configurable via the `[denylist]` section.
 

@@ -12,9 +12,11 @@ import (
 )
 
 func TestGrepHandlerCountsMatchesAndFiles(t *testing.T) {
+	// Long match bodies so the 40×100-char sample is smaller than 25 full lines
+	// and the sample cap stays visible (upstream #262).
 	var b strings.Builder
 	for i := 0; i < 60; i++ {
-		fmt.Fprintf(&b, "src/file%d.go:%d:  func handler%d() {\n", i%3, i+1, i)
+		fmt.Fprintf(&b, "src/file%d.go:%d:  func handler%d() { %s }\n", i%3, i+1, i, strings.Repeat("x", 200))
 	}
 	s := grepHandler("Bash", bashOut(t, b.String(), "", 0)).Summary
 	has(t, s, "grep — 60 matches in 3 files")
@@ -69,9 +71,11 @@ func TestLsHandlerEmpty(t *testing.T) {
 }
 
 func TestFindHandlerCountsPaths(t *testing.T) {
+	// Paths longer than the 120-char clip so 40 clipped samples beat 25 full
+	// lines and the sample cap stays visible (upstream #262).
 	var b strings.Builder
 	for i := 0; i < 45; i++ {
-		fmt.Fprintf(&b, "./internal/pkg%d/file.go\n", i)
+		fmt.Fprintf(&b, "./internal/%spkg%d/file.go\n", strings.Repeat("deep/", 40), i)
 	}
 	s := findHandler("Bash", bashOut(t, b.String(), "", 0)).Summary
 	has(t, s, "find — 45 paths")
@@ -166,5 +170,99 @@ func TestNormalizeCommand(t *testing.T) {
 	wrapped := mustParseT(t, `{"command":"cd /tmp && git diff HEAD"}`)
 	if got := GetBashHandler(wrapped); !samePtr(got, gitDiffHandler) {
 		t.Errorf("wrapped git diff routed to %s", HandlerName(got))
+	}
+}
+
+// ── never larger than the shell fallback (upstream #262) ────────────────────
+
+func linesOf(n int, f func(i int) string) string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = f(i)
+	}
+	return strings.Join(out, "\n")
+}
+
+func notLargerThanShell(t *testing.T, name string, h Handler, stdout string) {
+	t.Helper()
+	input := bashOut(t, stdout, "", 0)
+	if s, f := len(h("Bash", input).Summary), len(shellHandler("Bash", input).Summary); s > f {
+		t.Errorf("%s: summary %dB > shell %dB", name, s, f)
+	}
+}
+
+func TestGrepNeverLargerThanShell(t *testing.T) {
+	for _, n := range []int{1, 8, 24, 25, 26, 40, 41, 90, 200} {
+		for _, pad := range []int{0, 20, 80, 160} {
+			stdout := linesOf(n, func(i int) string {
+				return fmt.Sprintf("src/f%d.ts:%d:%s match %d", i, i+1, strings.Repeat("x", pad), i)
+			})
+			notLargerThanShell(t, fmt.Sprintf("grep n=%d pad=%d", n, pad), grepHandler, stdout)
+		}
+	}
+}
+
+func TestGrepKeepsHeaderWhenShrinking(t *testing.T) {
+	stdout := linesOf(90, func(i int) string { return fmt.Sprintf("src/f.ts:%d: x", i+1) })
+	has(t, grepHandler("Bash", bashOut(t, stdout, "", 0)).Summary, "grep — 90 matches")
+	notLargerThanShell(t, "grep 90 short", grepHandler, stdout)
+}
+
+func TestGrepKeepsEveryMatchUnderShellCap(t *testing.T) {
+	stdout := linesOf(8, func(i int) string { return fmt.Sprintf("src/a.ts:%d: unique_token_%d_here", i+1, i) })
+	s := grepHandler("Bash", bashOut(t, stdout, "", 0)).Summary
+	for i := 0; i < 8; i++ {
+		has(t, s, fmt.Sprintf("unique_token_%d_here", i))
+	}
+}
+
+func TestGrepHighReductionOnLongLines(t *testing.T) {
+	stdout := linesOf(200, func(i int) string {
+		return fmt.Sprintf("src/mod%d/file.ts:%d: %s match %d", i%6, i+1, strings.Repeat("body ", 50), i)
+	})
+	res := grepHandler("Bash", bashOut(t, stdout, "", 0))
+	has(t, res.Summary, "grep — 200 matches in 6 files")
+	if r := float64(len(res.Summary)) / float64(res.OriginalSize); r >= 0.15 {
+		t.Errorf("ratio %.3f, want < 0.15", r)
+	}
+	notLargerThanShell(t, "grep 200 long", grepHandler, stdout)
+}
+
+func TestLsNeverLargerThanShell(t *testing.T) {
+	for _, n := range []int{2, 10, 24, 25, 40, 80} {
+		notLargerThanShell(t, fmt.Sprintf("ls n=%d", n), lsHandler, linesOf(n, func(i int) string { return fmt.Sprintf("file%d.ts", i) }))
+	}
+}
+
+func TestLsKeepsEveryNameUnderShellCap(t *testing.T) {
+	s := lsHandler("Bash", bashOut(t, linesOf(8, func(i int) string { return fmt.Sprintf("unique_ls_%d.ts", i) }), "", 0)).Summary
+	for i := 0; i < 8; i++ {
+		has(t, s, fmt.Sprintf("unique_ls_%d.ts", i))
+	}
+}
+
+func TestFindNeverLargerThanShell(t *testing.T) {
+	for _, n := range []int{1, 8, 24, 25, 40, 80, 120} {
+		for _, pad := range []int{0, 40, 160} {
+			stdout := linesOf(n, func(i int) string { return fmt.Sprintf("./src/%s/file%d.ts", strings.Repeat("x", pad), i) })
+			notLargerThanShell(t, fmt.Sprintf("find n=%d pad=%d", n, pad), findHandler, stdout)
+		}
+	}
+}
+
+func TestFindKeepsEveryPathUnderShellCap(t *testing.T) {
+	s := findHandler("Bash", bashOut(t, linesOf(8, func(i int) string { return fmt.Sprintf("./src/unique_find_%d.ts", i) }), "", 0)).Summary
+	for i := 0; i < 8; i++ {
+		has(t, s, fmt.Sprintf("unique_find_%d.ts", i))
+	}
+}
+
+func TestFindCapVisibleOnLongPaths(t *testing.T) {
+	stdout := linesOf(120, func(i int) string { return fmt.Sprintf("./src/%sfile%d.ts", strings.Repeat("deep/", 40), i) })
+	res := findHandler("Bash", bashOut(t, stdout, "", 0))
+	has(t, res.Summary, "find — 120 paths")
+	has(t, res.Summary, "+80 more paths")
+	if len(res.Summary) >= res.OriginalSize {
+		t.Error("summary not smaller than original")
 	}
 }

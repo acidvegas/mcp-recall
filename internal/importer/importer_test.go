@@ -5,6 +5,7 @@ package importer
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -243,5 +244,125 @@ func TestImportRoundTripsCommandFP(t *testing.T) {
 	got := query(t, dbPath, "SELECT command_fp FROM stored_outputs WHERE tool_name = 'Bash'")
 	if len(got) != 1 || got[0][0] != "git diff" {
 		t.Errorf("command_fp after import = %v", got)
+	}
+}
+
+// ── secret scan (upstream #273) ─────────────────────────────────────────────
+
+const (
+	awsKeySample = "AKIAIOSFODNN7EXAMPLE" // AWS's documented non-secret sample
+	ghPATSample  = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+)
+
+func dumpRow(id string, mod func(*importRow)) importRow {
+	r := importRow{ID: id, ProjectKey: srcProject, SessionID: "sess-abc", ToolName: "mcp__github__list_issues",
+		Summary: "a clean summary", FullContent: "a clean body", OriginalSize: 12, SummarySize: 15, CreatedAt: 1_700_000_000}
+	if mod != nil {
+		mod(&r)
+	}
+	return r
+}
+
+// runImport writes rows as a dump, runs HandleImport against a fresh DB, and
+// returns combined stdout+stderr plus the DB path.
+func runImport(t *testing.T, rows []importRow, extra ...string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	dump := filepath.Join(dir, "dump.json")
+	b, _ := json.Marshal(rows)
+	os.WriteFile(dump, b, 0o644)
+	dbPath := filepath.Join(dir, "target.db")
+	t.Setenv("RECALL_DB_PATH", dbPath)
+
+	r, w, _ := os.Pipe()
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = w, w
+	HandleImport(append([]string{dump}, extra...))
+	w.Close()
+	os.Stdout, os.Stderr = oldOut, oldErr
+	out, _ := io.ReadAll(r)
+	return string(out), dbPath
+}
+
+func ids(t *testing.T, dbPath string) []string {
+	var out []string
+	for _, row := range query(t, dbPath, "SELECT id FROM stored_outputs ORDER BY id") {
+		out = append(out, row[0].(string))
+	}
+	return out
+}
+
+func TestImportWithholdsSecretRows(t *testing.T) {
+	_, dbPath := runImport(t, []importRow{
+		dumpRow("clean_row", func(r *importRow) { r.FullContent = "nothing sensitive here" }),
+		dumpRow("dirty_row", func(r *importRow) { r.FullContent = "export AWS_ACCESS_KEY_ID=" + awsKeySample }),
+	})
+	if got := ids(t, dbPath); len(got) != 1 || got[0] != "clean_row" {
+		t.Errorf("stored = %v, want [clean_row]", got)
+	}
+}
+
+// A summary-only row can only carry the secret in its summary; still withheld.
+func TestImportWithholdsSecretInSummary(t *testing.T) {
+	zero := 0
+	_, dbPath := runImport(t, []importRow{dumpRow("dirty_summary", func(r *importRow) {
+		r.Summary, r.FullContent, r.FullRetained = "token "+ghPATSample, "", &zero
+	})})
+	if got := ids(t, dbPath); len(got) != 0 {
+		t.Errorf("stored = %v, want none", got)
+	}
+}
+
+func TestImportReportsWithheldNotValues(t *testing.T) {
+	out, _ := runImport(t, []importRow{
+		dumpRow("clean_row", nil),
+		dumpRow("dirty_aws", func(r *importRow) { r.FullContent = "key=" + awsKeySample }),
+		dumpRow("dirty_gh", func(r *importRow) { r.FullContent = "token=" + ghPATSample }),
+	})
+	for _, want := range []string{"Withheld 2 row(s)", "AWS access key ID", "GitHub PAT (classic)", "1 imported"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, awsKeySample) || strings.Contains(out, ghPATSample) {
+		t.Errorf("output echoes a secret value:\n%s", out)
+	}
+}
+
+func TestImportDryRunPredictsWithheld(t *testing.T) {
+	out, dbPath := runImport(t, []importRow{
+		dumpRow("clean_row", nil),
+		dumpRow("dirty_aws", func(r *importRow) { r.FullContent = "key=" + awsKeySample }),
+	}, "--dry-run")
+	for _, want := range []string{"Would withhold 1 row(s)", "AWS access key ID", "1 imported"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, awsKeySample) {
+		t.Error("dry run echoes the secret")
+	}
+	if _, err := os.Stat(dbPath); err == nil {
+		t.Error("dry run created the database")
+	}
+}
+
+func TestImportAllWithheldLeavesStoreEmpty(t *testing.T) {
+	out, dbPath := runImport(t, []importRow{
+		dumpRow("dirty_a", func(r *importRow) { r.FullContent = "key=" + awsKeySample }),
+		dumpRow("dirty_b", func(r *importRow) { r.FullContent = "token=" + ghPATSample }),
+	})
+	if !strings.Contains(out, "Withheld 2 row(s)") || !strings.Contains(out, "Nothing imported.") {
+		t.Errorf("output:\n%s", out)
+	}
+	if got := ids(t, dbPath); len(got) != 0 {
+		t.Errorf("stored = %v", got)
+	}
+}
+
+func TestImportCleanDumpReportsNoWithheld(t *testing.T) {
+	out, _ := runImport(t, []importRow{dumpRow("clean_row", nil)})
+	if strings.Contains(out, "containing secrets") || !strings.Contains(out, "1 imported") {
+		t.Errorf("output:\n%s", out)
 	}
 }

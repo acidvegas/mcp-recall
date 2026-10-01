@@ -45,3 +45,20 @@ func TestShouldRetainFullBody(t *testing.T) {
 		})
 	}
 }
+
+// Unwrapping delegates to handlers.NormalizeCommand, so a fetch behind a
+// newline-separated cd keeps its body (upstream #260).
+func TestNewlineCdPrefix(t *testing.T) {
+	for _, cmd := range []string{"curl https://example.com", "gh api /repos/x/y", "wget https://example.com/f.tar"} {
+		if !ShouldRetainFullBody("balanced", "Bash", "cd /repo\n"+cmd) {
+			t.Errorf("dropped body for newline-cd %q", cmd)
+		}
+	}
+	for _, cmd := range []string{"curl https://example.com", "git diff", "ls -la", "gh api /x"} {
+		nl := ShouldRetainFullBody("balanced", "Bash", "cd /repo\n"+cmd)
+		amp := ShouldRetainFullBody("balanced", "Bash", "cd /repo && "+cmd)
+		if nl != amp {
+			t.Errorf("%q: newline=%v, &&=%v", cmd, nl, amp)
+		}
+	}
+}

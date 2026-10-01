@@ -5,6 +5,10 @@
 // Imported rows are always stamped with the current project's key so they are
 // reachable through the project-scoped tool layer. The former
 // `--keep-project-key` flag is rejected (upstream #226) — see HandleImport.
+//
+// Rows carrying a credential are withheld and reported rather than written —
+// see partitionSecrets (upstream #273). This is the only secret scan on the
+// import path.
 package importer
 
 import (
@@ -13,10 +17,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"mcprecall/internal/db"
 	"mcprecall/internal/projectkey"
+	"mcprecall/internal/secrets"
 )
 
 const (
@@ -99,6 +105,36 @@ func (r importRow) toStored(projectKey string) db.StoredOutput {
 
 type result struct{ imported, skipped, overwritten int }
 
+// partitionSecrets splits dump rows into those safe to write and those carrying
+// a credential. Import reaches storage through its own INSERT, bypassing the
+// PostToolUse hook, so this is the only secret scan on the path (upstream
+// #273). It runs before both the dry-run counter and the real insert so a
+// dry run cannot disagree with the run it predicts. One bad row must not fail a
+// large restore, so rows are skipped and reported — pattern names only, never
+// the matched value.
+func partitionSecrets(items []importRow) (clean []importRow, withheld int, patterns []string) {
+	seen := map[string]bool{}
+	for _, item := range items {
+		// Scan the body even for full_retained=0, whose body the insert drops: a
+		// tampered dump can pair that flag with a body, and a credential only in
+		// the summary is just as unsafe to store.
+		found := secrets.Find(item.Summary + "\n" + item.FullContent)
+		if len(found) == 0 {
+			clean = append(clean, item)
+			continue
+		}
+		withheld++
+		for _, name := range found {
+			if !seen[name] {
+				seen[name] = true
+				patterns = append(patterns, name)
+			}
+		}
+	}
+	sort.Strings(patterns)
+	return clean, withheld, patterns
+}
+
 // HandleImport implements the import CLI command.
 func HandleImport(args []string) {
 	overwrite := has(args, "--overwrite")
@@ -171,16 +207,30 @@ func HandleImport(args []string) {
 	projectKey := projectkey.Key(mustGetwd())
 	dbPath := db.DefaultDBPath(projectKey)
 
-	fmt.Printf("\nImporting %d item(s) into %s\n", len(items), dbPath)
+	clean, withheld, patterns := partitionSecrets(items)
+
+	fmt.Printf("\nImporting %d item(s) into %s\n", len(clean), dbPath)
 	if dryRun {
 		fmt.Print("(dry run — nothing will be written)\n\n")
 	}
 
+	// On stderr so the warning survives a redirected stdout. Worded apart from
+	// the "skipped (already exist)" count — both can occur in one run.
+	if withheld > 0 {
+		if dryRun {
+			fmt.Fprintf(os.Stderr, "Would withhold %d row(s) containing secrets (%s). They would not be imported.\n",
+				withheld, strings.Join(patterns, ", "))
+		} else {
+			fmt.Fprintf(os.Stderr, "Withheld %d row(s) containing secrets (%s). They were NOT imported.\n",
+				withheld, strings.Join(patterns, ", "))
+		}
+	}
+
 	var res result
 	if dryRun {
-		res = dryRunCount(dbPath, items, overwrite)
+		res = dryRunCount(dbPath, clean, overwrite)
 	} else {
-		res = importItems(dbPath, items, overwrite, projectKey)
+		res = importItems(dbPath, clean, overwrite, projectKey)
 	}
 
 	var parts []string

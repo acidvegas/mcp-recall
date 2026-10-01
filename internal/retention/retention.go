@@ -20,6 +20,8 @@ package retention
 import (
 	"regexp"
 	"strings"
+
+	"mcprecall/internal/handlers"
 )
 
 // networkBashRe matches Bash commands whose output is expensive or impossible to
@@ -27,18 +29,11 @@ import (
 // under "balanced".
 var networkBashRe = regexp.MustCompile(`^(curl|wget|https?|xh)\b|^gh\s+api\b`)
 
-// cdPrefixRe strips a leading `cd <dir> && ` / `cd <dir>; ` segment.
-var cdPrefixRe = regexp.MustCompile(`^cd\s+[^\s&;]+\s*(?:&&|;)\s*`)
-
-// unwrapCommand strips ALL leading cd segments so a fetch chained behind one or
-// more directory changes (`cd a && cd b && curl …`) is still seen.
-func unwrapCommand(command string) string {
-	c := strings.TrimSpace(command)
-	for cdPrefixRe.MatchString(c) {
-		c = strings.TrimSpace(cdPrefixRe.ReplaceAllString(c, ""))
-	}
-	return c
-}
+// unwrapCommand delegates to the one normalizer handler routing uses. This
+// package used to keep its own copy that understood only `&&`/`;`, so a fetch
+// behind a newline-separated `cd` was classified reproducible and its body
+// dropped under balanced (upstream #260).
+var unwrapCommand = handlers.NormalizeCommand
 
 // ShouldRetainFullBody reports whether the verbatim body should be persisted for
 // retrieval. command is the Bash tool_input.command ("" for non-Bash tools).

@@ -5,11 +5,13 @@ package hooks
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -492,5 +494,80 @@ func TestPostStoresCommandFingerprint(t *testing.T) {
 	items := db.ExportAll(database, projectkey.Key(currentCWD))
 	if len(items) != 1 || items[0].CommandFP == nil || *items[0].CommandFP != "git diff" {
 		t.Fatalf("stored rows = %d, command_fp = %v", len(items), items[0].CommandFP)
+	}
+}
+
+// ── image content blocks (upstream #270) ────────────────────────────────────
+
+func chromeScreenshot() (payload []any, imageData string) {
+	raw := make([]byte, 32*1024)
+	raw[0], raw[1], raw[2], raw[3] = 0xff, 0xd8, 0xff, 0xe2
+	copy(raw[4:], "ICC_PROFILE")
+	for i := 16; i < len(raw); i++ {
+		raw[i] = byte((i*17 + 31) & 0xff)
+	}
+	imageData = base64.StdEncoding.EncodeToString(raw)
+	return []any{
+		map[string]any{"type": "text", "text": "Successfully captured screenshot (1419x840, jpeg) - ID: ss_135241jnk"},
+		map[string]any{"type": "text", "text": "\n\nTab Context:\n- https://example.com/dashboard\n- Title: Dashboard"},
+		map[string]any{"type": "image", "mimeType": "image/jpeg", "data": imageData},
+	}, imageData
+}
+
+func ptuRaw(toolName string, response any) string {
+	b, _ := json.Marshal(map[string]any{
+		"session_id": sessionID, "cwd": currentCWD, "tool_name": toolName,
+		"tool_input": map[string]any{}, "tool_response": response,
+	})
+	return string(b)
+}
+
+var reductionRe = regexp.MustCompile(`\((\d+)% reduction\)`)
+
+func TestPostReplacesScreenshot(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	payload, imageData := chromeScreenshot()
+	out := HandlePostToolUse(ptuRaw("mcp__claude-in-chrome__computer", payload))
+	if out.UpdatedMCPToolOutput == "" || !out.SuppressOutput {
+		t.Fatal("screenshot passed through instead of being replaced")
+	}
+	body := out.UpdatedMCPToolOutput
+	for _, want := range []string{"ss_135241jnk", "1419x840", "jpeg", "Tab Context"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("summary missing %q", want)
+		}
+	}
+	if strings.Contains(body, imageData) {
+		t.Error("summary contains the image bytes")
+	}
+	m := reductionRe.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("no reduction in header: %q", body[:min(len(body), 200)])
+	}
+	if pct, _ := strconv.Atoi(m[1]); pct <= 90 {
+		t.Errorf("reduction %d%%, want > 90", pct)
+	}
+
+	database, _ := db.Open(os.Getenv("RECALL_DB_PATH"))
+	defer database.Close()
+	items := db.ExportAll(database, projectkey.Key(currentCWD))
+	if len(items) != 1 || !strings.Contains(items[0].FullContent, "ss_135241jnk") || strings.Contains(items[0].FullContent, imageData) {
+		t.Errorf("stored full_content should be the stripped text")
+	}
+}
+
+func TestPostTextOnlyBlocksKeepText(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	payload := []any{
+		map[string]any{"type": "text", "text": "Scrolled down 400 pixels"},
+		map[string]any{"type": "text", "text": "\n\nTab Context:\n- https://example.com/page\n- Title: Page"},
+	}
+	out := HandlePostToolUse(ptuRaw("mcp__claude-in-chrome__computer", payload))
+	if regexp.MustCompile(`(?i)secret|denied|refus`).MatchString(out.UpdatedMCPToolOutput) {
+		t.Errorf("text-only payload refused: %q", out.UpdatedMCPToolOutput)
+	}
+	if out.UpdatedMCPToolOutput != "" && (!strings.Contains(out.UpdatedMCPToolOutput, "Scrolled down 400 pixels") ||
+		!strings.Contains(out.UpdatedMCPToolOutput, "Tab Context")) {
+		t.Errorf("text lost: %q", out.UpdatedMCPToolOutput)
 	}
 }

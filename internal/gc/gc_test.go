@@ -116,26 +116,58 @@ func TestClassifyUnverifiableWhenParentAlsoGone(t *testing.T) {
 	}
 }
 
-func TestClassifyRelativePathIsUnverifiable(t *testing.T) {
-	// A relative recorded path resolves against whatever cwd gc runs from, so
-	// it would classify differently per invocation — and "." would read as
-	// "parent survived, project deleted". Never deletable.
-	store := t.TempDir()
-	for _, rel := range []string{".", "some/relative/path", "bare"} {
-		name := "rel_" + strings.ReplaceAll(rel, "/", "_")
-		name = strings.ReplaceAll(name, ".", "dot")
-		mkDB(t, store, name, rel)
+// mkDBRecorded is mkDB but always records projectPath, even "".
+func mkDBRecorded(t *testing.T, dir, name, projectPath string) string {
+	t.Helper()
+	file := mkDB(t, dir, name, "")
+	database, _ := db.Open(file)
+	defer database.Close()
+	if err := db.SetMeta(database, "project_path", projectPath); err != nil {
+		t.Fatalf("setmeta: %v", err)
 	}
+	return file
+}
 
-	entries := ScanDatabases(store, filepath.Join(store, "none.db"), 90, now)
-	for _, e := range entries {
-		if e.Status != StatusUnverifiable {
-			t.Errorf("%s: want unverifiable for relative path %q, got %s",
-				filepath.Base(e.File), e.ProjectPath, e.Status)
+var unrootedPaths = []string{"", "myproject", "some/relative/path", "."}
+
+// A relative path resolves against whatever cwd gc runs from, and "." would
+// read as "parent survived, project deleted" — so it is never deleted on a
+// deleted-project inference. Fresh, it is kept (upstream #214).
+func TestClassifyUnrootedFreshIsKept(t *testing.T) {
+	for i, rel := range unrootedPaths {
+		store := t.TempDir()
+		mkDBRecorded(t, store, fmt.Sprintf("rel%d", i), rel)
+		e := ScanDatabases(store, filepath.Join(store, "none.db"), 90, time.Now())[0]
+		if e.Status != StatusUnrootedFresh || IsDeletionCandidate(e.Status) {
+			t.Errorf("%q: status %s, want kept unrooted-fresh", rel, e.Status)
 		}
-		if IsDeletionCandidate(e.Status) {
-			t.Errorf("%s: relative-path DB must never be deletable", filepath.Base(e.File))
+	}
+}
+
+// Past the stale window an un-rootable DB falls through to the staleness rule
+// instead of staying pinned forever (upstream #214).
+func TestClassifyUnrootedStaleIsCandidate(t *testing.T) {
+	for i, rel := range unrootedPaths {
+		store := t.TempDir()
+		mkDBRecorded(t, store, fmt.Sprintf("rel%d", i), rel)
+		e := ScanDatabases(store, filepath.Join(store, "none.db"), 90, time.Now().AddDate(0, 0, 200))[0]
+		if e.ProjectPath != rel {
+			t.Errorf("projectPath = %q, want %q", e.ProjectPath, rel)
 		}
+		if e.Status != StatusUnrootedStale || !IsDeletionCandidate(e.Status) {
+			t.Errorf("%q: status %s, want deletable unrooted-stale", rel, e.Status)
+		}
+	}
+}
+
+// An absolute path whose whole tree is gone is likely an unmounted volume that
+// may return intact — never a candidate, however old.
+func TestUnmountedAbsolutePathNeverDeletedWhenOld(t *testing.T) {
+	store := t.TempDir()
+	mkDB(t, store, "unmounted", "/no/such/mount/point/project")
+	e := ScanDatabases(store, filepath.Join(store, "none.db"), 90, time.Now().AddDate(0, 0, 500))[0]
+	if e.Status != StatusUnverifiable || IsDeletionCandidate(e.Status) {
+		t.Errorf("status %s, want unverifiable", e.Status)
 	}
 }
 
@@ -198,6 +230,23 @@ func TestCurrentDBIsNeverTouched(t *testing.T) {
 	if IsDeletionCandidate(e.Status) {
 		t.Error("the live DB must never be a deletion candidate")
 	}
+	// Still probed, so the report shows its real identity (upstream #265).
+	if e.ProjectPath != project || e.Items != 1 {
+		t.Errorf("current DB reported path %q items %d, want %q and 1", e.ProjectPath, e.Items, project)
+	}
+}
+
+// A current DB that probes unreadable must stay current, never unreadable.
+func TestCurrentDBStaysCurrentWhenUnreadable(t *testing.T) {
+	store := t.TempDir()
+	file := filepath.Join(store, "mine.db")
+	raw, _ := sql.Open("sqlite", file)
+	raw.Exec(`CREATE TABLE something_else (x)`)
+	raw.Close()
+	e := ScanDatabases(store, file, 90, now)[0]
+	if e.Status != StatusCurrent || IsDeletionCandidate(e.Status) {
+		t.Errorf("status %s, want current", e.Status)
+	}
 }
 
 func TestCurrentDBMatchesThroughNonNormalizedPath(t *testing.T) {
@@ -251,13 +300,15 @@ func TestVacuumTargetsExcludeCandidatesAndCurrent(t *testing.T) {
 		{File: "e.db", Status: StatusLegacyStale},
 		{File: "f.db", Status: StatusUnverifiable},
 		{File: "g.db", Status: StatusUnreadable},
+		{File: "h.db", Status: StatusUnrootedFresh},
+		{File: "i.db", Status: StatusUnrootedStale},
 	}
 	got := VacuumTargets(entries)
-	if len(got) != 2 {
-		t.Fatalf("want 2 vacuum targets, got %d: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("want 3 vacuum targets, got %d: %+v", len(got), got)
 	}
-	if got[0].File != "b.db" || got[1].File != "d.db" {
-		t.Errorf("want active + legacy-fresh only, got %+v", got)
+	if got[0].File != "b.db" || got[1].File != "d.db" || got[2].File != "h.db" {
+		t.Errorf("want active + legacy-fresh + unrooted-fresh only, got %+v", got)
 	}
 }
 
@@ -265,6 +316,7 @@ func TestEveryStatusHasAPolicy(t *testing.T) {
 	all := []Status{
 		StatusCurrent, StatusActive, StatusOrphaned, StatusUnverifiable,
 		StatusLegacyFresh, StatusLegacyStale, StatusUnreadable,
+		StatusUnrootedFresh, StatusUnrootedStale,
 	}
 	for _, s := range all {
 		func() {

@@ -10,6 +10,10 @@
 // explicit overflow line, and fall back to the shell handler when the output
 // doesn't match the expected shape. The full output stays retrievable via
 // recall__*.
+//
+// Budget: summaries are sized to the generic shell cap — the sample shrinks
+// until it fits, and if shell already kept every line the handler defers to it.
+// These never compress worse than the fallback they replace (upstream #262).
 
 package handlers
 
@@ -34,6 +38,57 @@ func overflowLine(total, shown int, noun string) []string {
 		return []string{fmt.Sprintf("  … (+%d more %s)", total-shown, noun)}
 	}
 	return nil
+}
+
+func stdoutLineCount(output any) int {
+	lines := strings.Split(extractStdout(output), "\n")
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return len(lines)
+}
+
+// fitUnderFallback keeps a specialised summary only when it is no larger than
+// the shell handler's. If it overshoots and shell already kept every line, it
+// defers so cheap-to-show items aren't hidden; otherwise it binary-searches the
+// largest sample that fits.
+func fitUnderFallback(toolName string, output any, total int, build func(shown int) Result) Result {
+	fallback := shellHandler(toolName, output)
+	budget := len(fallback.Summary)
+	maxShown := min(maxSearchSample, total)
+	fits := func(n int) bool { return len(build(n).Summary) <= budget }
+
+	if fits(maxShown) {
+		return build(maxShown)
+	}
+	if stdoutLineCount(output) <= headStdout || !fits(0) {
+		return fallback
+	}
+	best, lo, hi := 0, 0, maxShown
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		if fits(mid) {
+			best = mid
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	if candidate := build(best); len(candidate.Summary) <= budget {
+		return candidate
+	}
+	return fallback
+}
+
+// sampleSummary is a header, the first shown items (each passed through line),
+// and an overflow line for the rest.
+func sampleSummary(header string, items []string, shown int, noun string, line func(string) string, originalSize int) Result {
+	out := []string{header}
+	for _, it := range items[:min(shown, len(items))] {
+		out = append(out, line(it))
+	}
+	out = append(out, overflowLine(len(items), shown, noun)...)
+	return Result{Summary: strings.Join(out, "\n"), OriginalSize: originalSize}
 }
 
 // ── grep / ripgrep — inline "file:line:content" form (piped, --no-heading) ─────
@@ -73,15 +128,13 @@ func grepHandler(toolName string, output any) Result {
 	header := fmt.Sprintf("grep — %d %s in %d %s",
 		len(matches), plural(len(matches), "match", "matches"),
 		len(files), plural(len(files), "file", "files"))
-	out := []string{header}
+	formatted := make([]string, len(matches))
 	for i, m := range matches {
-		if i >= maxSearchSample {
-			break
-		}
-		out = append(out, fmt.Sprintf("  %s:%s: %s", m.file, m.line, clipSearch(strings.TrimSpace(m.text), 100)))
+		formatted[i] = fmt.Sprintf("  %s:%s: %s", m.file, m.line, clipSearch(strings.TrimSpace(m.text), 100))
 	}
-	out = append(out, overflowLine(len(matches), maxSearchSample, "matches")...)
-	return Result{Summary: strings.Join(out, "\n"), OriginalSize: originalSize}
+	return fitUnderFallback(toolName, output, len(matches), func(shown int) Result {
+		return sampleSummary(header, formatted, shown, "matches", func(s string) string { return s }, originalSize)
+	})
 }
 
 // ── ls — long (-l), recursive (-R), and plain forms ───────────────────────────
@@ -133,15 +186,11 @@ func lsHandler(toolName string, output any) Result {
 	}
 	if len(dirHeaders) >= 2 && hasBlankSeparator {
 		entries := len(nonEmpty) - len(dirHeaders) - totals
-		out := []string{fmt.Sprintf("ls -R — %d directories, ~%d entries", len(dirHeaders), entries)}
-		for i, d := range dirHeaders {
-			if i >= maxSearchSample {
-				break
-			}
-			out = append(out, "  "+strings.TrimSpace(d))
-		}
-		out = append(out, overflowLine(len(dirHeaders), maxSearchSample, "directories")...)
-		return Result{Summary: strings.Join(out, "\n"), OriginalSize: originalSize}
+		header := fmt.Sprintf("ls -R — %d directories, ~%d entries", len(dirHeaders), entries)
+		return fitUnderFallback(toolName, output, len(dirHeaders), func(shown int) Result {
+			return sampleSummary(header, dirHeaders, shown, "directories",
+				func(d string) string { return "  " + strings.TrimSpace(d) }, originalSize)
+		})
 	}
 
 	// Long format: perm-string lines. Count dirs vs files.
@@ -166,16 +215,12 @@ func lsHandler(toolName string, output any) Result {
 			}
 		}
 		files := len(longLines) - dirs
-		out := []string{fmt.Sprintf("ls — %d entries (%d %s, %d %s)",
-			len(longLines), dirs, plural(dirs, "dir", "dirs"), files, plural(files, "file", "files"))}
-		for i, n := range names {
-			if i >= maxSearchSample {
-				break
-			}
-			out = append(out, "  "+clipSearch(n, 100))
-		}
-		out = append(out, overflowLine(len(names), maxSearchSample, "entries")...)
-		return Result{Summary: strings.Join(out, "\n"), OriginalSize: originalSize}
+		header := fmt.Sprintf("ls — %d entries (%d %s, %d %s)",
+			len(longLines), dirs, plural(dirs, "dir", "dirs"), files, plural(files, "file", "files"))
+		return fitUnderFallback(toolName, output, len(names), func(shown int) Result {
+			return sampleSummary(header, names, shown, "entries",
+				func(n string) string { return "  " + clipSearch(n, 100) }, originalSize)
+		})
 	}
 
 	// Plain listing: names one-per-line or column-wrapped. Flatten to tokens.
@@ -190,15 +235,11 @@ func lsHandler(toolName string, output any) Result {
 	if len(tokens) < 2 {
 		return shellHandler(toolName, output)
 	}
-	out := []string{fmt.Sprintf("ls — %d entries", len(tokens))}
-	for i, n := range tokens {
-		if i >= maxSearchSample {
-			break
-		}
-		out = append(out, "  "+clipSearch(n, 100))
-	}
-	out = append(out, overflowLine(len(tokens), maxSearchSample, "entries")...)
-	return Result{Summary: strings.Join(out, "\n"), OriginalSize: originalSize}
+	header := fmt.Sprintf("ls — %d entries", len(tokens))
+	return fitUnderFallback(toolName, output, len(tokens), func(shown int) Result {
+		return sampleSummary(header, tokens, shown, "entries",
+			func(n string) string { return "  " + clipSearch(n, 100) }, originalSize)
+	})
 }
 
 // ── find / fd — one path per line ─────────────────────────────────────────────
@@ -228,15 +269,11 @@ func findHandler(toolName string, output any) Result {
 		return shellHandler(toolName, output)
 	}
 
-	out := []string{fmt.Sprintf("find — %d %s", len(paths), plural(len(paths), "path", "paths"))}
-	for i, p := range paths {
-		if i >= maxSearchSample {
-			break
-		}
-		out = append(out, "  "+clipSearch(p, 120))
-	}
-	out = append(out, overflowLine(len(paths), maxSearchSample, "paths")...)
-	return Result{Summary: strings.Join(out, "\n"), OriginalSize: originalSize}
+	header := fmt.Sprintf("find — %d %s", len(paths), plural(len(paths), "path", "paths"))
+	return fitUnderFallback(toolName, output, len(paths), func(shown int) Result {
+		return sampleSummary(header, paths, shown, "paths",
+			func(p string) string { return "  " + clipSearch(p, 120) }, originalSize)
+	})
 }
 
 // ceilHalf is Math.ceil(n * 0.5).
