@@ -22,6 +22,9 @@ type StoredOutput struct {
 	// FullRetained is 1 when the verbatim body is persisted (retrievable), 0 when
 	// the row is summary-only (body dropped per store.retention).
 	FullRetained int
+	// CommandFP is the privacy-safe command family fingerprint (Bash rows only;
+	// nil otherwise or pre-migration). See upstream #251.
+	CommandFP *string
 }
 
 // StoreInput is the input required to persist a new compressed tool output.
@@ -41,6 +44,9 @@ type StoreInput struct {
 	// no chunks are written, but OutputHash is still derived from the real
 	// content so dedup keeps working.
 	FullRetained *int
+	// CommandFP is the privacy-safe command family fingerprint (Bash only); nil
+	// stores NULL.
+	CommandFP *string
 }
 
 // SearchOptions configures full-text search across stored outputs.
@@ -78,7 +84,8 @@ type Stats struct {
 	TotalSummaryBytes  int
 	CompressionRatio   float64
 	// Pinned* are store-wide (notes included): pinned bytes are what eviction
-	// cannot reclaim, whatever wrote them.
+	// cannot reclaim, whatever wrote them. PinnedBytes is effective size
+	// (summary_size for summary-only rows), matching the max_pinned_mb budget.
 	PinnedItems int
 	PinnedBytes int
 	// Note* are recall__note memory — stored memory, not interception.
@@ -89,6 +96,14 @@ type Stats struct {
 // ToolBreakdownRow is a per-tool storage stats row.
 type ToolBreakdownRow struct {
 	ToolName      string
+	Items         int
+	OriginalBytes int
+	SummaryBytes  int
+}
+
+// CommandBreakdownRow is a per-command-family row from GetBashCommandBreakdown.
+type CommandBreakdownRow struct {
+	CommandFP     string // "unknown" for pre-migration / untagged Bash rows
 	Items         int
 	OriginalBytes int
 	SummaryBytes  int

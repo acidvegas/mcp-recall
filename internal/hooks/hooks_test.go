@@ -471,3 +471,26 @@ func TestPostRetentionWiring(t *testing.T) {
 		}
 	}
 }
+
+// A Bash row stores its command family; NormalizeCommand strips --no-pager and
+// only the bare subcommand is kept, never the argument.
+func TestPostStoresCommandFingerprint(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	bigDiff := "diff --git a/f b/f\n" + strings.Repeat("+added line\n", 400)
+	resp, _ := json.Marshal(map[string]any{"stdout": bigDiff, "stderr": "", "exit_code": 0})
+	payload := map[string]any{
+		"session_id": sessionID, "cwd": currentCWD, "tool_name": "Bash",
+		"tool_input":    map[string]any{"command": "git --no-pager diff HEAD~1"},
+		"tool_response": string(resp),
+	}
+	b, _ := json.Marshal(payload)
+	if isEmpty(HandlePostToolUse(string(b))) {
+		t.Fatal("not intercepted")
+	}
+	database, _ := db.Open(os.Getenv("RECALL_DB_PATH"))
+	defer database.Close()
+	items := db.ExportAll(database, projectkey.Key(currentCWD))
+	if len(items) != 1 || items[0].CommandFP == nil || *items[0].CommandFP != "git diff" {
+		t.Fatalf("stored rows = %d, command_fp = %v", len(items), items[0].CommandFP)
+	}
+}

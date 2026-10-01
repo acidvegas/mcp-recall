@@ -137,6 +137,15 @@ func HandlePostToolUse(raw string) HookOutput {
 		logx.Debug(fmt.Sprintf("summary-only · %s · retention=%s", toolName, cfg.Store.Retention))
 	}
 
+	// Privacy-safe command family fingerprint for per-command savings
+	// attribution (upstream #251). Bash only; "" (no bare verb) stores NULL.
+	var commandFP *string
+	if toolName == "Bash" && command != "" {
+		if fp := handlers.CommandFingerprint(handlers.NormalizeCommand(command)); fp != "" {
+			commandFP = &fp
+		}
+	}
+
 	stored, err := db.StoreOutput(database, db.StoreInput{
 		ProjectKey:   projectKey,
 		SessionID:    sessionID,
@@ -147,6 +156,7 @@ func HandlePostToolUse(raw string) HookOutput {
 		InputHash:    inputHash,
 		OutputHash:   &outputHash, // reuse the hash computed above
 		FullRetained: &fullRetained,
+		CommandFP:    commandFP,
 	})
 	if err != nil {
 		logx.Error("post-tool-use store failed: " + err.Error())

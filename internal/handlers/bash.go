@@ -375,16 +375,73 @@ var (
 	gitGlobalOpts = regexp.MustCompile(`^git\s+(?:(?:--no-pager|--paginate|-P)\s+|-[cC]\s+\S+\s+)+`)
 )
 
-// normalizeCommand normalises a Bash command so routing sees the real
+// NormalizeCommand normalises a Bash command so routing sees the real
 // subcommand: it unwraps a leading `cd <dir> && …` and strips git global options
 // (--no-pager, -C <path>, -c <k=v>, --paginate, -P) that would otherwise push
 // `git diff` output to the generic shell fallback.
-func normalizeCommand(command string) string {
+func NormalizeCommand(command string) string {
 	c := strings.TrimSpace(command)
 	if m := cdPrefixRe.FindStringSubmatch(c); m != nil {
 		c = strings.TrimSpace(m[1])
 	}
 	return gitGlobalOpts.ReplaceAllString(c, "git ")
+}
+
+// subcommandTools are dispatchers whose first token names a tool family, not the
+// operation — the meaningful fingerprint is "verb subcommand" ("git diff").
+var subcommandTools = map[string]bool{
+	"git": true, "cargo": true, "go": true, "npm": true, "pnpm": true,
+	"yarn": true, "bun": true, "docker": true, "kubectl": true,
+}
+
+// wrapperTools prefix a real command; skipped so the fingerprint names the
+// wrapped operation ("sudo apt-get …" → "apt-get").
+var wrapperTools = map[string]bool{"sudo": true, "doas": true, "time": true, "nice": true}
+
+var (
+	envAssignRe = regexp.MustCompile(`^(?:[A-Za-z_]\w*=\S*\s+)+`)
+	// A bare token: letters then letters/digits/-/_, terminated by whitespace, a
+	// shell operator (; & | < > ( )), or end-of-string. Upstream uses a
+	// lookahead for the terminator; RE2 has none, so it is matched and only
+	// group 1 is used. The terminator chars are outside the token charset, so
+	// the captured token is the same.
+	bareTokenRe = regexp.MustCompile(`^([a-zA-Z][\w-]*)(?:[\s;&|<>()]|$)`)
+	// A wrapper word directly followed by another bare verb; the trailing
+	// [a-zA-Z] stands in for upstream's lookahead and is not consumed.
+	wrapperRe = regexp.MustCompile(`^([a-zA-Z][\w-]*)\s+[a-zA-Z]`)
+)
+
+// CommandFingerprint derives a privacy-safe command "family" from a NORMALIZED
+// command (see NormalizeCommand) for per-command savings attribution (upstream
+// #251). It returns the leading bare token, plus the second when the first is a
+// subcommand dispatcher. Extraction stops at the first flag, path, quote, `=`,
+// pipe or redirection, so an argument or secret can never enter it. Leading
+// VAR=value assignments and wrappers (sudo/doas/time/nice, when directly
+// followed by a bare verb) are skipped and discarded; a flagged wrapper
+// (`sudo -u www …`) keeps the wrapper name. Returns "" when there is no bare
+// leading token (subshell, ./script); callers store that as unknown.
+func CommandFingerprint(command string) string {
+	c := envAssignRe.ReplaceAllString(strings.TrimSpace(command), "")
+	for i := 0; i < 4; i++ {
+		m := wrapperRe.FindStringSubmatchIndex(c)
+		if m == nil || !wrapperTools[c[m[2]:m[3]]] {
+			break
+		}
+		c = c[m[1]-1:]
+	}
+	first := bareTokenRe.FindStringSubmatch(c)
+	if first == nil {
+		return ""
+	}
+	verb := first[1]
+	if !subcommandTools[verb] {
+		return verb
+	}
+	second := bareTokenRe.FindStringSubmatch(strings.TrimLeft(c[len(verb):], " \t\n\v\f\r"))
+	if second == nil {
+		return verb
+	}
+	return verb + " " + second[1]
 }
 
 // GetBashHandler returns the handler for a native Bash tool call based on the
@@ -394,7 +451,7 @@ func GetBashHandler(input any) Handler {
 	if rawCommand == "" {
 		return shellHandler
 	}
-	command := normalizeCommand(rawCommand)
+	command := NormalizeCommand(rawCommand)
 	switch {
 	case cmdGitGrep.MatchString(command):
 		return grepHandler

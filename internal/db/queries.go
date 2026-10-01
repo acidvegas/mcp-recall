@@ -20,7 +20,16 @@ import (
 // storedColumns is the explicit column list matching StoredOutput scan order.
 const storedColumns = `id, project_key, session_id, tool_name, summary, full_content,
 	original_size, summary_size, created_at, pinned, access_count, last_accessed, input_hash, output_hash,
-	full_retained`
+	full_retained, command_fp`
+
+// EffectiveSizeExpr is a row's effective stored size — the bytes it actually
+// occupies. A summary-only row (full_retained = 0, written under
+// store.retention) drops its body and chunks, so it costs ~summary_size, not
+// original_size. Used by the byte-cap accounting (max_size_mb eviction,
+// max_pinned_mb pin budget) so lowering retention expands the item budget
+// (upstream #247). NOT used for the savings figures, which report the context
+// actually saved.
+const EffectiveSizeExpr = "CASE WHEN full_retained = 1 THEN original_size ELSE summary_size END"
 
 // VacuumThreshold is the minimum number of deleted rows that triggers
 // incremental_vacuum to reclaim disk space.
@@ -31,11 +40,11 @@ func scanOutput(s interface {
 }) (StoredOutput, error) {
 	var o StoredOutput
 	var lastAccessed sql.NullInt64
-	var inputHash, outputHash sql.NullString
+	var inputHash, outputHash, commandFP sql.NullString
 	err := s.Scan(
 		&o.ID, &o.ProjectKey, &o.SessionID, &o.ToolName, &o.Summary, &o.FullContent,
 		&o.OriginalSize, &o.SummarySize, &o.CreatedAt, &o.Pinned, &o.AccessCount,
-		&lastAccessed, &inputHash, &outputHash, &o.FullRetained,
+		&lastAccessed, &inputHash, &outputHash, &o.FullRetained, &commandFP,
 	)
 	if err != nil {
 		return o, err
@@ -51,6 +60,10 @@ func scanOutput(s interface {
 	if outputHash.Valid {
 		v := outputHash.String
 		o.OutputHash = &v
+	}
+	if commandFP.Valid {
+		v := commandFP.String
+		o.CommandFP = &v
 	}
 	return o, nil
 }
@@ -137,11 +150,12 @@ func StoreOutput(database *sql.DB, in StoreInput) (StoredOutput, error) {
 	_, err = tx.Exec(`
 		INSERT INTO stored_outputs
 			(id, project_key, session_id, tool_name, summary, full_content,
-			 original_size, summary_size, created_at, input_hash, output_hash, full_retained)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 original_size, summary_size, created_at, input_hash, output_hash, full_retained, command_fp)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, in.ProjectKey, in.SessionID, in.ToolName,
 		in.Summary, bodyToStore, in.OriginalSize,
 		summarySize, createdAt, nullString(in.InputHash), nullString(outputHash), fullRetained,
+		nullString(in.CommandFP),
 	)
 	if err != nil {
 		tx.Rollback()
@@ -162,7 +176,7 @@ func StoreOutput(database *sql.DB, in StoreInput) (StoredOutput, error) {
 		ToolName: in.ToolName, Summary: in.Summary, FullContent: bodyToStore,
 		OriginalSize: in.OriginalSize, SummarySize: summarySize, CreatedAt: createdAt,
 		Pinned: 0, AccessCount: 0, LastAccessed: nil, InputHash: in.InputHash, OutputHash: outputHash,
-		FullRetained: fullRetained,
+		FullRetained: fullRetained, CommandFP: in.CommandFP,
 	}, nil
 }
 
@@ -233,16 +247,16 @@ func PinOutput(database *sql.DB, id, projectKey string, pinned bool) (bool, erro
 // PinOutputBounded pins or unpins an item, enforcing the pinned-data cap at the
 // write. Pinned items are exempt from expiry and eviction, so an unbounded number
 // of pins would silently void store.max_size_mb. When pinning a not-yet-pinned
-// item and maxPinnedMB is positive, if the item's original_size would push total
-// pinned bytes over the cap the row is left unpinned and PinOverBudget is
-// returned — so the bound holds even if the caller ignores the result and keeps
+// item and maxPinnedMB is positive, if the item's effective size (summary_size
+// for summary-only rows, else original_size) would push total pinned bytes over
+// the cap the row is left unpinned and PinOverBudget is returned — so the bound holds even if the caller ignores the result and keeps
 // pinning. Unpinning, and re-pinning an already-pinned item, are never checked.
 // A non-positive maxPinnedMB disables the check.
 func PinOutputBounded(database *sql.DB, id, projectKey string, pinned bool, maxPinnedMB float64) (PinOutcome, error) {
 	var itemSize int64
 	var alreadyPinned int
 	err := database.QueryRow(
-		`SELECT original_size, pinned FROM stored_outputs WHERE id = ? AND project_key = ?`,
+		`SELECT `+EffectiveSizeExpr+`, pinned FROM stored_outputs WHERE id = ? AND project_key = ?`,
 		id, projectKey).Scan(&itemSize, &alreadyPinned)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PinOutcome{Reason: PinNotFound}, nil
@@ -255,7 +269,7 @@ func PinOutputBounded(database *sql.DB, id, projectKey string, pinned bool, maxP
 		capBytes := int64(maxPinnedMB * 1024 * 1024)
 		var pinnedBytes int64
 		if err := database.QueryRow(
-			`SELECT COALESCE(SUM(original_size), 0) FROM stored_outputs WHERE project_key = ? AND pinned = 1`,
+			`SELECT COALESCE(SUM(`+EffectiveSizeExpr+`), 0) FROM stored_outputs WHERE project_key = ? AND pinned = 1`,
 			projectKey).Scan(&pinnedBytes); err != nil {
 			return PinOutcome{}, err
 		}
@@ -319,7 +333,10 @@ func CheckOutputDedup(database *sql.DB, projectKey, outputHash string) (*StoredO
 const secondsPerDay = 86400
 
 // EvictIfNeeded enforces the project store size cap by evicting the
-// lowest-value non-pinned items until total original_size is within maxSizeMB.
+// lowest-value non-pinned items until total effective size is within maxSizeMB.
+// Effective size is original_size for full-body rows and summary_size for
+// summary-only rows, so lowering retention raises the number of items the store
+// holds before eviction (upstream #247).
 // Value is a recency-weighted frequency score: (access_count + 1) decayed by an
 // exponential half-life on the time since last access (falling back to creation
 // time for never-accessed items). nowSecs is injectable for deterministic tests.
@@ -328,7 +345,7 @@ func EvictIfNeeded(database *sql.DB, projectKey string, maxSizeMB float64, halfL
 
 	var total int64
 	if err := database.QueryRow(`
-		SELECT COALESCE(SUM(original_size), 0) FROM stored_outputs WHERE project_key = ?`, projectKey).Scan(&total); err != nil {
+		SELECT COALESCE(SUM(`+EffectiveSizeExpr+`), 0) FROM stored_outputs WHERE project_key = ?`, projectKey).Scan(&total); err != nil {
 		return 0, err
 	}
 	if total <= maxBytes {
@@ -337,7 +354,7 @@ func EvictIfNeeded(database *sql.DB, projectKey string, maxSizeMB float64, halfL
 	bytesToShed := total - maxBytes
 
 	rows, err := database.Query(`
-		SELECT id, original_size, access_count, last_accessed, created_at
+		SELECT id, `+EffectiveSizeExpr+`, access_count, last_accessed, created_at
 		FROM stored_outputs
 		WHERE project_key = ? AND pinned = 0`, projectKey)
 	if err != nil {

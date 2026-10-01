@@ -42,6 +42,9 @@ type importRow struct {
 	// store.retention: an older dump has no flag and its rows all carry bodies,
 	// so a missing value defaults to retained (1).
 	FullRetained *int `json:"full_retained"`
+	// CommandFP is optional for dumps predating per-command attribution
+	// (upstream #251): missing → NULL, reported as "unknown".
+	CommandFP *string `json:"command_fp"`
 }
 
 func (r importRow) validate(i int) []string {
@@ -78,12 +81,19 @@ func (r importRow) toStored(projectKey string) db.StoredOutput {
 	if r.FullRetained != nil {
 		fullRetained = *r.FullRetained
 	}
+	// Enforce StoreOutput's invariant: a summary-only row carries no body. A
+	// legitimate export already has "" here, but a malformed dump may not, and
+	// effective-size accounting would then under-count it (upstream #247).
+	fullContent := r.FullContent
+	if fullRetained == 0 {
+		fullContent = ""
+	}
 	return db.StoredOutput{
 		ID: r.ID, ProjectKey: projectKey, SessionID: r.SessionID, ToolName: r.ToolName,
-		Summary: r.Summary, FullContent: r.FullContent, OriginalSize: r.OriginalSize,
+		Summary: r.Summary, FullContent: fullContent, OriginalSize: r.OriginalSize,
 		SummarySize: r.SummarySize, CreatedAt: r.CreatedAt, Pinned: r.Pinned,
 		AccessCount: r.AccessCount, LastAccessed: r.LastAccessed, InputHash: r.InputHash,
-		FullRetained: fullRetained,
+		FullRetained: fullRetained, CommandFP: r.CommandFP,
 	}
 }
 

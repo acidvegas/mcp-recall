@@ -389,6 +389,11 @@ func storedToObj(s db.StoredOutput) *jsonx.Obj {
 	} else {
 		o.Set("output_hash", nil)
 	}
+	if s.CommandFP != nil {
+		o.Set("command_fp", *s.CommandFP)
+	} else {
+		o.Set("command_fp", nil)
+	}
 	return o
 }
 
@@ -792,6 +797,36 @@ func Stats(database *sql.DB, projectKey string, args StatsArgs) string {
 			}
 			lines = append(lines, fmt.Sprintf("  %s  %s item%s  %s → %s  %s",
 				padEnd(row.ToolName, colW), padStart(strconv.Itoa(row.Items), 4), itemWord,
+				padStart(format.Bytes(row.OriginalBytes), 8), padEnd(format.Bytes(row.SummaryBytes), 8), padStart(reduction, 4)))
+		}
+	}
+
+	// Per-command breakdown for Bash — attributes the aggregate Bash figure to
+	// command families so low-reduction rows (the compression leaks) are
+	// visible (upstream #251).
+	cmdBreakdown := db.GetBashCommandBreakdown(database, projectKey)
+	if len(cmdBreakdown) > 0 {
+		lines = append(lines, "", "By Bash command (sorted by original size):")
+		colW := 0
+		for _, r := range cmdBreakdown {
+			if l := runeLen(r.CommandFP); l > colW {
+				colW = l
+			}
+		}
+		if colW > 40 {
+			colW = 40
+		}
+		for _, row := range cmdBreakdown {
+			reduction := " —"
+			if row.OriginalBytes > 0 {
+				reduction = fmt.Sprintf("%d%%", int(math.Round((1-float64(row.SummaryBytes)/float64(row.OriginalBytes))*100)))
+			}
+			itemWord := "s"
+			if row.Items == 1 {
+				itemWord = " "
+			}
+			lines = append(lines, fmt.Sprintf("  %s  %s item%s  %s → %s  %s",
+				padEnd(row.CommandFP, colW), padStart(strconv.Itoa(row.Items), 4), itemWord,
 				padStart(format.Bytes(row.OriginalBytes), 8), padEnd(format.Bytes(row.SummaryBytes), 8), padStart(reduction, 4)))
 		}
 	}

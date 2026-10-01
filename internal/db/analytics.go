@@ -35,7 +35,7 @@ func GetStats(database *sql.DB, projectKey string) Stats {
 			COALESCE(SUM(CASE WHEN tool_name != 'recall__note' THEN original_size ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN tool_name != 'recall__note' THEN summary_size ELSE 0 END), 0),
 			COALESCE(SUM(pinned), 0),
-			COALESCE(SUM(CASE WHEN pinned = 1 THEN original_size ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN pinned = 1 THEN `+EffectiveSizeExpr+` ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN tool_name = 'recall__note' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN tool_name = 'recall__note' THEN original_size ELSE 0 END), 0)
 		FROM stored_outputs
@@ -47,6 +47,35 @@ func GetStats(database *sql.DB, projectKey string) Stats {
 		s.CompressionRatio = float64(s.TotalSummaryBytes) / float64(s.TotalOriginalBytes)
 	}
 	return s
+}
+
+// GetBashCommandBreakdown returns per-command-family storage stats for Bash
+// rows only, sorted by original_bytes desc (upstream #251). Pre-migration /
+// untagged Bash rows fold into an "unknown" bucket.
+func GetBashCommandBreakdown(database *sql.DB, projectKey string) []CommandBreakdownRow {
+	rows, err := database.Query(`
+		SELECT
+			COALESCE(command_fp, 'unknown'),
+			COUNT(*),
+			COALESCE(SUM(original_size),0),
+			COALESCE(SUM(summary_size),0)
+		FROM stored_outputs
+		WHERE project_key = ? AND tool_name = 'Bash'
+		GROUP BY COALESCE(command_fp, 'unknown')
+		ORDER BY 3 DESC`, projectKey)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []CommandBreakdownRow
+	for rows.Next() {
+		var r CommandBreakdownRow
+		if err := rows.Scan(&r.CommandFP, &r.Items, &r.OriginalBytes, &r.SummaryBytes); err != nil {
+			return out
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // GetToolBreakdown returns per-tool storage stats, sorted by original_bytes desc.

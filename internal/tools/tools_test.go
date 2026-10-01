@@ -420,6 +420,31 @@ func TestStats(t *testing.T) {
 	hasT(t, Stats(d, projectKey, StatsArgs{}), "Session days:      2")
 }
 
+// The per-command section attributes the aggregate Bash figure, keeping a
+// low-reduction family visible (upstream #251).
+func TestStatsBashCommandBreakdown(t *testing.T) {
+	d := setup(t)
+	for _, c := range []struct {
+		fp      string
+		orig    int
+		summary string
+	}{{"git diff", 8000, strings.Repeat("d", 80)}, {"cat", 6000, strings.Repeat("c", 5000)}} {
+		in := baseInput()
+		in.ToolName = "Bash"
+		in.OriginalSize = c.orig
+		in.Summary = c.summary
+		fp := c.fp
+		in.CommandFP = &fp
+		store(t, d, in)
+	}
+	r := Stats(d, projectKey, StatsArgs{})
+	hasT(t, r, "By Bash command (sorted by original size):")
+	if !regexp.MustCompile(`git diff\s+1 item`).MatchString(r) || !regexp.MustCompile(`cat\s+1 item`).MatchString(r) {
+		t.Errorf("missing per-command rows:\n%s", r)
+	}
+	hasT(t, r, "  git diff     1 item      7.8KB → 80B        99%")
+}
+
 // recall__note memory is stored memory, not interception: it must not count
 // toward the savings figures, and is reported on its own line instead.
 func TestStatsExcludesNotesFromSavings(t *testing.T) {

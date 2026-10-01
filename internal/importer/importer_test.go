@@ -4,6 +4,7 @@
 package importer
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"mcprecall/internal/db"
+	"mcprecall/internal/tools"
 )
 
 const srcProject = "import_test_source_key"
@@ -199,5 +201,47 @@ func TestValidateFullRetainedRange(t *testing.T) {
 	}
 	if issues := mkRow("recall_a", "Bash", "[s]", "").validate(0); len(issues) != 0 {
 		t.Errorf("missing full_retained should be valid: %v", issues)
+	}
+}
+
+// A tampered dump can pair full_retained=0 with a body; import must drop it to
+// match StoreOutput, or effective-size accounting under-counts the row.
+func TestImportDropsBodyOfSummaryOnlyRow(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "t.db")
+	r := mkRow("recall_deadbeefcafe0001", "Bash", "short summary", strings.Repeat("x", 10000))
+	zero := 0
+	r.FullRetained = &zero
+	if res := importItems(dbPath, []importRow{r}, false, "k"); res.imported != 1 {
+		t.Fatalf("imported = %d", res.imported)
+	}
+	rows := query(t, dbPath, "SELECT full_content, full_retained FROM stored_outputs")
+	if len(rows) != 1 || rows[0][0] != "" || rows[0][1] != int64(0) {
+		t.Errorf("want 1 row with empty body and full_retained 0, got %d rows", len(rows))
+	}
+	if n := query(t, dbPath, "SELECT COUNT(*) FROM outputs_fts WHERE outputs_fts MATCH 'xxxxxxxxxx*'"); n[0][0] != int64(0) {
+		t.Errorf("dropped body still indexed: %v", n)
+	}
+}
+
+// command_fp round-trips through export → import, not reset to unknown.
+func TestImportRoundTripsCommandFP(t *testing.T) {
+	src, _ := db.Open(":memory:")
+	defer src.Close()
+	fp := "git diff"
+	db.StoreOutput(src, db.StoreInput{ProjectKey: srcProject, SessionID: "s", ToolName: "Bash",
+		Summary: "d", FullContent: "body", OriginalSize: 100, CommandFP: &fp})
+	dump := tools.Export(src, srcProject)
+
+	var rows []importRow
+	if err := json.Unmarshal([]byte(dump), &rows); err != nil {
+		t.Fatalf("export is not importable JSON: %v", err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "t.db")
+	if res := importItems(dbPath, rows, false, "k"); res.imported != 1 {
+		t.Fatalf("imported = %d", res.imported)
+	}
+	got := query(t, dbPath, "SELECT command_fp FROM stored_outputs WHERE tool_name = 'Bash'")
+	if len(got) != 1 || got[0][0] != "git diff" {
+		t.Errorf("command_fp after import = %v", got)
 	}
 }

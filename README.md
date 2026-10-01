@@ -168,6 +168,11 @@ lowering the total cap alone can never produce a `max_pinned_mb > max_size_mb`
 contradiction; setting both in contradiction rejects the config to defaults.
 `recall__stats` reports pinned usage against the cap and warns past 80%.
 
+Both caps count each item's **effective** size: a summary-only row (see
+`retention`) costs its summary size, not the original, so lowering retention
+both reduces bytes on disk and raises the number of items the store holds
+before eviction fires.
+
 ### Reclaiming disk — `mcprecall gc`
 
 Per-project databases outlive their projects: once a project directory is

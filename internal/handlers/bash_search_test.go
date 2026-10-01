@@ -158,8 +158,8 @@ func TestNormalizeCommand(t *testing.T) {
 		"ls -la":                         "ls -la",
 	}
 	for in, want := range cases {
-		if got := normalizeCommand(in); got != want {
-			t.Errorf("normalizeCommand(%q) = %q, want %q", in, got, want)
+		if got := NormalizeCommand(in); got != want {
+			t.Errorf("NormalizeCommand(%q) = %q, want %q", in, got, want)
 		}
 	}
 	// And routing follows the normalised form.

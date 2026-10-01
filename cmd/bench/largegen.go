@@ -9,7 +9,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"mcprecall/internal/jsonx"
@@ -33,6 +36,13 @@ func generatedFixtures() []Fixture {
 		{"cli", "Bash: git status ×500", "Bash", bashInput("git status"), genGitStatus(500)},
 		{"cli", "Bash: go test ×1200", "Bash", bashInput("go test ./..."), genTestRunner(1200)},
 		{"cli", "Bash: docker ps ×120", "Bash", bashInput("docker ps -a"), genDockerPs(120)},
+		// Upstream's command-aware Bash fixtures (scripts/benchmark.ts, #249).
+		{"cli", "Bash: tsc --noEmit (60 errors)", "Bash", bashInput("tsc --noEmit"), genTscErrors()},
+		{"cli", "Bash: cargo build (failure)", "Bash", bashInput("cargo build"), genCargoBuild()},
+		{"cli", "Bash: git --no-pager diff ×18", "Bash", bashInput("git --no-pager diff"), genGitDiff()},
+		{"cli", "Bash: rg ×240 (6 files)", "Bash", bashInput("rg --no-heading doThing"), genRgMatches()},
+		{"cli", "Bash: ls -R (deep tree)", "Bash", bashInput("ls -R"), genLsR()},
+		{"cli", "Bash: find ×400", "Bash", bashInput("find . -name '*.ts'"), genFindPaths()},
 	}
 }
 
@@ -272,4 +282,66 @@ func genDockerPs(n int) string {
 			i*2654435761, pick(images, i), i%30, i%24, 20000+i, 8080, i)
 	}
 	return b.String()
+}
+
+// ── upstream benchmark fixtures (scripts/benchmark.ts) ────────────────────────
+
+// bashResult wraps output the way a native Bash tool response arrives.
+func bashResult(stdout, stderr string, exitCode int) string {
+	b, _ := json.Marshal(map[string]any{"stdout": stdout, "stderr": stderr, "exit_code": exitCode})
+	return string(b)
+}
+
+// rep repeats line n times, replacing every %i with the index.
+func rep(line string, n int) string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = strings.ReplaceAll(line, "%i", strconv.Itoa(i))
+	}
+	return strings.Join(out, "\n")
+}
+
+func genTscErrors() string {
+	stdout := rep("src/module%i/file%i.ts(%i,10): error TS2345: Argument of type 'Foo%i' is not assignable to parameter of type 'Bar%i'.", 60) +
+		"\n\nFound 60 errors in 60 files.\n" +
+		rep("  at Object.<anonymous> (/repo/node_modules/typescript/lib/tsc.js:%i:40)", 300)
+	return bashResult(stdout, "", 2)
+}
+
+func genCargoBuild() string {
+	stderr := "   Compiling demo v0.1.0 (/home/u/demo)\n" +
+		rep("error[E0308]: mismatched types\n  --> src/mod%i.rs:%i:20\n   |\n%i |     let x: u32 = \"hi\";\n   |            ---   ^^^^ expected `u32`, found `&str`\n   |", 12) +
+		"\nerror: aborting due to 12 previous errors\nerror: could not compile `demo` (bin \"demo\") due to 12 previous errors"
+	return bashResult("", stderr, 101)
+}
+
+func genGitDiff() string {
+	files := make([]string, 18)
+	for i := range files {
+		files[i] = fmt.Sprintf("diff --git a/src/f%d.ts b/src/f%d.ts\nindex abc..def 100644\n--- a/src/f%d.ts\n+++ b/src/f%d.ts\n@@ -1,6 +1,8 @@\n", i, i, i, i) +
+			rep(" context %i", 4) + "\n" + rep("-old %i", 5) + "\n" + rep("+new %i", 7)
+	}
+	return bashResult(strings.Join(files, "\n"), "", 0)
+}
+
+var modNumRe = regexp.MustCompile(`mod(\d+)`)
+
+func genRgMatches() string {
+	stdout := modNumRe.ReplaceAllStringFunc(rep("src/mod%i/orchestrator.ts:%i:  const r = doThing(ctx, %i)", 240), func(m string) string {
+		n, _ := strconv.Atoi(m[3:])
+		return "mod" + strconv.Itoa(n%6)
+	})
+	return bashResult(stdout, "", 0)
+}
+
+func genLsR() string {
+	dirs := make([]string, 25)
+	for i := range dirs {
+		dirs[i] = fmt.Sprintf("./src/pkg%d:\n", i) + rep("a%i.ts", 8) + "\n"
+	}
+	return bashResult(strings.Join(dirs, "\n"), "", 0)
+}
+
+func genFindPaths() string {
+	return bashResult(rep("./src/very/deeply/nested/path/segment/file%i.ts", 400), "", 0)
 }
