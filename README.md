@@ -252,7 +252,7 @@ go run ./cmd/bench --report   # static, screenshot/CI-friendly report
 
 ![benchmark](.screens/benchmark.png)
 
-Results on the bundled 30-fixture corpus — 2.0 MB of realistic tool output
+Results on the bundled 36-fixture corpus — 2.1 MB of realistic tool output
 spanning every handler, the native `Bash` path, content fallbacks, and edge
 cases. Byte figures are exact; tokens are estimated with tiktoken `o200k_base`
 as an offline proxy for Claude's tokenizer (~±10%):
@@ -268,12 +268,15 @@ as an offline proxy for Claude's tokenizer (~±10%):
 | read_file (big source) | 121.6 KB | 1.6 KB | 98.7% |
 | Bash: go test ×1200 | 32.8 KB | 690 B | 97.9% |
 | Bash: git status ×500 | 17.0 KB | 855 B | 95.1% |
-| **typical output** | — | — | **98.9%** |
+| Bash: find ×400 | 19.5 KB | 1.2 KB | 93.8% |
+| Bash: tsc --noEmit (60 errors) | 31.8 KB | 2.2 KB | 93.2% |
+| Bash: rg ×240 (6 files) | 13.9 KB | 1.4 KB | 89.9% |
+| **typical output** | — | — | **98.6%** |
 
-Across the corpus, tokens go **686,693 → 7,409 — a 98.9% reduction** (~679,000
+Across the corpus, tokens go **713,014 → 9,560 — a 98.7% reduction** (~703,000
 saved), with **0 round-trip failures** (every stored item is verified
 byte-identical) and the secret-bearing fixture **correctly blocked** from
-storage, at ~16–19 MB/s.
+storage, at ~10–18 MB/s.
 Byte figures are exact and deterministic; what matters most is the **ratio**,
 which holds regardless of tokenizer. Small/edge fixtures (a 5-byte ping,
 malformed JSON) are reported separately so they don't skew the headline.
