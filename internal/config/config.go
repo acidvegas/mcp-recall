@@ -221,10 +221,10 @@ func validate(p *partial) string {
 		if s.Key != nil && *s.Key != "git_root" && *s.Key != "cwd" {
 			issues = append(issues, "store.key: must be git_root or cwd")
 		}
-		if s.MaxSizeMB != nil && float64(*s.MaxSizeMB) <= 0 {
+		if s.MaxSizeMB != nil && !(float64(*s.MaxSizeMB) > 0) {
 			issues = append(issues, "store.max_size_mb: must be positive")
 		}
-		if s.MaxPinnedMB != nil && float64(*s.MaxPinnedMB) <= 0 {
+		if s.MaxPinnedMB != nil && !(float64(*s.MaxPinnedMB) > 0) {
 			issues = append(issues, "store.max_pinned_mb: must be positive")
 		}
 		if s.PinRecommendationThreshold != nil && *s.PinRecommendationThreshold <= 0 {
@@ -237,7 +237,8 @@ func validate(p *partial) string {
 			issues = append(issues, "store.eviction_half_life_days: must be positive")
 		}
 		// Non-negative, not positive: 0 is the documented way to disable the reminder.
-		if s.GCReminderMB != nil && float64(*s.GCReminderMB) < 0 {
+		// Negated comparisons so NaN fails too (TOML accepts `nan`).
+		if s.GCReminderMB != nil && !(float64(*s.GCReminderMB) >= 0) {
 			issues = append(issues, "store.gc_reminder_mb: must not be negative")
 		}
 		if s.Retention != nil {

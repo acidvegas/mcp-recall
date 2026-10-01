@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"mcprecall/internal/gc"
 	"mcprecall/internal/server"
 )
 
@@ -110,5 +111,22 @@ func TestCompletionFish(t *testing.T) {
 func TestCompletionUnknownShell(t *testing.T) {
 	if _, err := completionScript("elvish"); err == nil || !strings.Contains(err.Error(), "unknown shell") {
 		t.Errorf("expected unknown-shell error, got %v", err)
+	}
+}
+
+// ── status store footprint ──────────────────────────────────────────────────
+
+func TestPrintStoreFootprint(t *testing.T) {
+	small := captureStdout(func() { printStoreFootprint(gc.Footprint{TotalBytes: 1024, DBCount: 1}, 2048) })
+	if !strings.Contains(small, "✓ Store: 1.0KB across 1 project database\n") || strings.Contains(small, "gc") {
+		t.Errorf("small store: %q", small)
+	}
+	big := captureStdout(func() { printStoreFootprint(gc.Footprint{TotalBytes: 3 << 30, DBCount: 7}, 2048) })
+	if !strings.Contains(big, "! Store:") || !strings.Contains(big, "7 project databases") || !strings.Contains(big, "mcprecall gc") {
+		t.Errorf("large store: %q", big)
+	}
+	off := captureStdout(func() { printStoreFootprint(gc.Footprint{TotalBytes: 3 << 30, DBCount: 7}, 0) })
+	if strings.Contains(off, "!") {
+		t.Errorf("gc_reminder_mb=0 should disable the nudge: %q", off)
 	}
 }

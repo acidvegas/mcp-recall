@@ -1,3 +1,4 @@
+// mcprecall-go - Developed by acidvegas in Go (https://github.com/acidvegas)
 // internal/db/pinbudget_test.go
 // Covers PinOutputBounded (upstream #205 / PR #239) and ForeignKeyBreakdown
 // (upstream #237 / PR #241).

@@ -1,3 +1,4 @@
+// mcprecall-go - Developed by acidvegas in Go (https://github.com/acidvegas)
 // internal/config/maxpinned_test.go
 // Covers store.max_pinned_mb (upstream #205 / PR #239).
 
@@ -92,5 +93,17 @@ func TestMaxPinnedEqualToMaxSizeAllowed(t *testing.T) {
 	c := Load()
 	if c.Store.MaxSizeMB != 10 || c.Store.MaxPinnedMB != 10 {
 		t.Fatalf("equal caps should be accepted, got %+v", c.Store)
+	}
+}
+
+// TOML accepts `nan`; NaN fails every comparison, so a `<= 0` check would let it
+// through and silently disable the cap. Upstream's zod z.number() rejects NaN.
+func TestNaNRejected(t *testing.T) {
+	for _, key := range []string{"max_size_mb", "max_pinned_mb", "gc_reminder_mb"} {
+		withFile(t, "[store]\n"+key+" = nan\nstale_item_days = 9\n")
+		c := Load()
+		if c.Store.StaleItemDays != 3 || c.Store.MaxSizeMB != 500 || c.Store.MaxPinnedMB != 250 || c.Store.GCReminderMB != 2048 {
+			t.Errorf("%s = nan should reset config to defaults, got %+v", key, c.Store)
+		}
 	}
 }

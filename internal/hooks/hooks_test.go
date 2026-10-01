@@ -125,6 +125,60 @@ func TestSessionStartRecordsAndIdempotent(t *testing.T) {
 	}
 }
 
+func recordedPath(t *testing.T) string {
+	t.Helper()
+	database, _ := db.Open(os.Getenv("RECALL_DB_PATH"))
+	defer database.Close()
+	p, _ := db.GetMeta(database, "project_path")
+	return p
+}
+
+func TestSessionStartRecordsProjectPath(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	HandleSessionStart(sessionStart(nil))
+	if got := recordedPath(t); got != projectkey.Path(currentCWD) {
+		t.Errorf("project_path = %q, want %q", got, projectkey.Path(currentCWD))
+	}
+}
+
+// A relative payload cwd is rooted against this process's cwd; recording a path
+// that doesn't exist would let gc read the live project as orphaned.
+func TestSessionStartSkipsNonexistentPath(t *testing.T) {
+	hookEnv(t)
+	currentCWD = "definitely-not-a-real-dir-xyz"
+	HandleSessionStart(sessionStart(nil))
+	if got := recordedPath(t); got != "" {
+		t.Errorf("project_path = %q, want unrecorded", got)
+	}
+}
+
+func TestSessionStartSkipsFilePath(t *testing.T) {
+	hookEnv(t)
+	f := filepath.Join(t.TempDir(), "not-a-dir")
+	os.WriteFile(f, []byte("x"), 0o644)
+	currentCWD = f
+	HandleSessionStart(sessionStart(nil))
+	if got := recordedPath(t); got != "" {
+		t.Errorf("project_path = %q, want unrecorded for a file", got)
+	}
+}
+
+// SetMeta upserts, so a session that can't verify its path leaves an earlier
+// verified one in place.
+func TestSessionStartKeepsVerifiedPath(t *testing.T) {
+	currentCWD, _ = hookEnv(t)
+	HandleSessionStart(sessionStart(nil))
+	first := recordedPath(t)
+	if first == "" {
+		t.Fatal("first session recorded nothing")
+	}
+	currentCWD = "definitely-not-a-real-dir-xyz"
+	HandleSessionStart(sessionStart(nil))
+	if got := recordedPath(t); got != first {
+		t.Errorf("project_path = %q, want kept %q", got, first)
+	}
+}
+
 func TestSessionStartInjection(t *testing.T) {
 	var pk string
 	currentCWD, pk = hookEnv(t)
@@ -379,4 +433,41 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// Default retention is balanced: reproducible Bash is stored summary-only while
+// a network fetch keeps its body.
+func TestPostRetentionWiring(t *testing.T) {
+	var lines []string
+	for i := 0; i < 300; i++ {
+		lines = append(lines, "line "+itoa(i)+" of some reasonably long output text here")
+	}
+	stdout := strings.Join(lines, "\n")
+	for _, tc := range []struct {
+		command  string
+		retained int
+	}{{"cat big.txt", 0}, {"curl https://example.com/data", 1}} {
+		currentCWD, _ = hookEnv(t)
+		payload := map[string]any{
+			"session_id": sessionID, "cwd": currentCWD, "tool_name": "Bash",
+			"tool_input":    map[string]any{"command": tc.command},
+			"tool_response": map[string]any{"stdout": stdout, "stderr": "", "interrupted": false},
+		}
+		b, _ := json.Marshal(payload)
+		if out := HandlePostToolUse(string(b)); isEmpty(out) {
+			t.Fatalf("%s: not intercepted", tc.command)
+		}
+		database, _ := db.Open(os.Getenv("RECALL_DB_PATH"))
+		items := db.ExportAll(database, projectkey.Key(currentCWD))
+		database.Close()
+		if len(items) != 1 {
+			t.Fatalf("%s: stored %d rows, want 1", tc.command, len(items))
+		}
+		if items[0].FullRetained != tc.retained {
+			t.Errorf("%s: full_retained = %d, want %d", tc.command, items[0].FullRetained, tc.retained)
+		}
+		if hasBody := items[0].FullContent != ""; hasBody != (tc.retained == 1) {
+			t.Errorf("%s: body present = %v, want %v", tc.command, hasBody, tc.retained == 1)
+		}
+	}
 }

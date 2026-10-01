@@ -1,3 +1,4 @@
+// mcprecall-go - Developed by acidvegas in Go (https://github.com/acidvegas)
 // internal/db/retention_test.go
 // Covers summary-only storage (upstream PR #246 / store.retention).
 

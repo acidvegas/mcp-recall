@@ -52,20 +52,17 @@ func resolvePath(cwd string) string {
 	// git's --show-toplevel output is already absolute and normalised, and is
 	// left untouched: passing it through Abs could alter the string for some
 	// paths and re-key every existing git project's database.
-	resolved := cwd
-	if err == nil {
-		if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
-			resolved = trimmed
-		}
-	}
-	if resolved != "" && !filepath.IsAbs(resolved) {
-		if abs, absErr := filepath.Abs(resolved); absErr == nil {
+	var resolved string
+	if trimmed := strings.TrimSpace(string(out)); err == nil && trimmed != "" {
+		resolved = trimmed
+	} else if cwd != "" {
+		// Abs also cleans, so `/x/a/../b` and `/x/b/` key the same as `/x/b`.
+		resolved = cwd
+		if abs, absErr := filepath.Abs(cwd); absErr == nil {
 			resolved = abs
 		}
-	} else if resolved == "" {
-		if wd, wdErr := os.Getwd(); wdErr == nil {
-			resolved = wd
-		}
+	} else if wd, wdErr := os.Getwd(); wdErr == nil {
+		resolved = wd
 	}
 
 	pathCacheMu.Lock()

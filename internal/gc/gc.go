@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -197,8 +198,10 @@ type probe struct {
 // (corrupt) is reported readable:false so it is never a deletion candidate.
 func probeDB(file string) probe {
 	// mode=ro so a probe can never create or modify a file; immutable is NOT set
-	// because a live DB may have a WAL that must still be read.
-	database, err := sql.Open("sqlite", "file:"+file+"?mode=ro")
+	// because a live DB may have a WAL that must still be read. The path is
+	// URL-escaped so `#` or `%` in it isn't parsed as URI syntax.
+	uri := (&url.URL{Scheme: "file", Path: file, RawQuery: "mode=ro"}).String()
+	database, err := sql.Open("sqlite", uri)
 	if err != nil {
 		return probe{}
 	}
@@ -374,17 +377,20 @@ func VacuumFile(file string) VacuumResult {
 	if err != nil {
 		return VacuumResult{Err: err}
 	}
-	defer database.Close()
 	database.SetMaxOpenConns(1)
 
 	for _, stmt := range []string{"PRAGMA busy_timeout=5000", "PRAGMA auto_vacuum=INCREMENTAL", "VACUUM"} {
 		if _, err := database.Exec(stmt); err != nil {
+			database.Close()
 			// VACUUM is atomic — a failure leaves the DB intact. Log the real
 			// cause; the caller derives a user-facing reason from it.
 			logx.Warn(fmt.Sprintf("vacuum failed for %s — %v", filepath.Base(file), err))
 			return VacuumResult{Err: err}
 		}
 	}
+	// Close before measuring: in WAL mode the rewrite sits in the -wal file
+	// until the close checkpoints and removes it.
+	database.Close()
 	return VacuumResult{Before: before, After: dbFootprint(file)}
 }
 

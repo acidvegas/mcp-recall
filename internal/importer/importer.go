@@ -64,6 +64,9 @@ func (r importRow) validate(i int) []string {
 	if r.Pinned < 0 || r.Pinned > 1 {
 		issues = append(issues, fmt.Sprintf("[%d.pinned] must be 0 or 1", i))
 	}
+	if r.FullRetained != nil && (*r.FullRetained < 0 || *r.FullRetained > 1) {
+		issues = append(issues, fmt.Sprintf("[%d.full_retained] must be 0 or 1", i))
+	}
 	return issues
 }
 

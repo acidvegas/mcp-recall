@@ -4,6 +4,7 @@
 package projectkey
 
 import (
+	"path/filepath"
 	"regexp"
 	"testing"
 )
@@ -32,5 +33,31 @@ func TestPath(t *testing.T) {
 	nonGit := t.TempDir()
 	if got := Path(nonGit); got != nonGit {
 		t.Errorf("non-git path = %q, want %q", got, nonGit)
+	}
+}
+
+// The path is recorded as project_path and drives gc's orphan decision, so it
+// must be absolute for any input (upstream #213/#219). These reach the non-git
+// fallback because the directories don't exist.
+func TestPathAbsoluteForAnyInput(t *testing.T) {
+	for _, in := range []string{"definitely-not-a-real-dir-xyz", "./also/not/real", ""} {
+		if got := Path(in); !filepath.IsAbs(got) {
+			t.Errorf("Path(%q) = %q, want absolute", in, got)
+		}
+	}
+}
+
+// Built by concatenation, not filepath.Join, which would clean the input before
+// it reached Path.
+func TestPathNormalisesNonGitPath(t *testing.T) {
+	base := t.TempDir()
+	want := filepath.Join(base, "b")
+	for _, messy := range []string{base + "/a/../b", base + "/b/", base + "//b"} {
+		if got := Path(messy); got != want {
+			t.Errorf("Path(%q) = %q, want %q", messy, got, want)
+		}
+	}
+	if Key(base+"/b/") != Key(want) {
+		t.Error("a trailing slash must not change the key")
 	}
 }

@@ -1,3 +1,4 @@
+// mcprecall-go - Developed by acidvegas in Go (https://github.com/acidvegas)
 // internal/tools/scope_test.go
 // Covers the recall__pin budget message (upstream #205 / PR #239) and the
 // recall__forget / recall__list_stored project_key override (upstream #237 / PR #241).

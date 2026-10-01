@@ -69,7 +69,7 @@ mcprecall <command> [options]
 Shell completions:
 
 ```sh
-./mcprecall completions zsh  >> ~/.zfunc/_mcprecall
+./mcprecall completions zsh  >  ~/.zfunc/_mcprecall
 ./mcprecall completions bash >  /etc/bash_completion.d/mcprecall
 ./mcprecall completions fish >  ~/.config/fish/completions/mcprecall.fish
 ```

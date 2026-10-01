@@ -13,7 +13,9 @@ import (
 	"strconv"
 	"time"
 
+	"mcprecall/internal/config"
 	"mcprecall/internal/db"
+	"mcprecall/internal/format"
 	"mcprecall/internal/gc"
 	"mcprecall/internal/hooks"
 	"mcprecall/internal/importer"
@@ -164,6 +166,25 @@ func printStatus(r install.StatusReport) {
 	fmt.Printf("  %s PostToolUse hook\n", tick(r.PostToolUseHook))
 	fmt.Printf("  %s CLAUDE.md instructions\n", tick(r.ClaudeMD))
 	fmt.Printf("  %s binary present\n", tick(r.BinaryExists))
+	fmt.Println()
+	printStoreFootprint(gc.StoreFootprint(db.DataDir()), config.Load().Store.GCReminderMB)
+}
+
+// printStoreFootprint nudges toward `gc` when the on-disk store is large.
+func printStoreFootprint(fp gc.Footprint, reminderMB float64) {
+	large := reminderMB > 0 && float64(fp.TotalBytes) >= reminderMB*1024*1024
+	icon := "✓"
+	if large {
+		icon = "!"
+	}
+	plural := "s"
+	if fp.DBCount == 1 {
+		plural = ""
+	}
+	fmt.Printf("  %s Store: %s across %d project database%s\n", icon, format.Bytes(int(fp.TotalBytes)), fp.DBCount, plural)
+	if large {
+		fmt.Println("    → Reclaim space: mcprecall gc (review, then re-run with --force)")
+	}
 }
 
 // runGC parses the gc subcommand's flags and runs it against the live store.

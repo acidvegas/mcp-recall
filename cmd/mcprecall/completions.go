@@ -61,7 +61,7 @@ complete -F _mcprecall mcprecall
 
 const zshCompletion = `#compdef mcprecall
 # mcprecall zsh completions
-# Add to your fpath, e.g.: mcprecall completions zsh >> ~/.zfunc/_mcprecall
+# Add to your fpath, e.g.: mcprecall completions zsh > ~/.zfunc/_mcprecall
 # Then in ~/.zshrc: fpath=(~/.zfunc ${fpath}); autoload -Uz compinit && compinit
 
 _mcprecall_profiles() {

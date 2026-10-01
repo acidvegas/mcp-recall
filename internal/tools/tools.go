@@ -299,7 +299,10 @@ func Pin(database *sql.DB, projectKey string, args PinArgs) string {
 	if args.Pinned != nil {
 		pinned = *args.Pinned
 	}
-	outcome, _ := db.PinOutputBounded(database, args.ID, projectKey, pinned, config.Load().Store.MaxPinnedMB)
+	outcome, err := db.PinOutputBounded(database, args.ID, projectKey, pinned, config.Load().Store.MaxPinnedMB)
+	if err != nil {
+		return "[recall: error] " + err.Error()
+	}
 	if outcome.OK {
 		verb := "pinned"
 		if !pinned {

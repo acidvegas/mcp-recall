@@ -1,3 +1,4 @@
+// mcprecall-go - Developed by acidvegas in Go (https://github.com/acidvegas)
 // internal/gc/gc_test.go
 // Covers `mcprecall gc` (upstream PR #201): classification, deletion policy,
 // vacuum targeting, and the session-start footprint reminder.
@@ -404,6 +405,37 @@ func TestVacuumRunsOnSurvivorsAndKeepsData(t *testing.T) {
 	}
 }
 
+func TestVacuumResultMeasuresAfterWALCheckpoint(t *testing.T) {
+	// db.Open DBs are WAL: VACUUM writes the rewrite into -wal, which is only
+	// checkpointed away on close. The reported After must be the settled size.
+	file := mkDB(t, t.TempDir(), "wal", "")
+	database, _ := db.Open(file)
+	for i := 0; i < 300; i++ {
+		db.StoreOutput(database, db.StoreInput{
+			ProjectKey: "wal", SessionID: "s", ToolName: "t",
+			Summary: "[s]", FullContent: strings.Repeat(fmt.Sprint(i), 3000), OriginalSize: 3000,
+		})
+	}
+	database.Close()
+	database, _ = db.Open(file)
+	if _, err := database.Exec(`PRAGMA auto_vacuum=NONE; VACUUM`); err != nil {
+		t.Fatal(err)
+	}
+	db.ForgetOutputs(database, "wal", db.ForgetOptions{All: true, Force: true})
+	database.Close()
+
+	result := VacuumFile(file)
+	if result.Err != nil {
+		t.Fatalf("vacuum failed: %v", result.Err)
+	}
+	if settled := dbFootprint(file); result.After != settled {
+		t.Errorf("VacuumResult.After = %d, settled footprint = %d", result.After, settled)
+	}
+	if result.After >= result.Before {
+		t.Errorf("reported no reclaim: %d → %d bytes", result.Before, result.After)
+	}
+}
+
 func TestVacuumReclaimsOnLegacyAutoVacuumNoneDB(t *testing.T) {
 	// The case --vacuum exists for: a database created without
 	// auto_vacuum=INCREMENTAL, where incremental_vacuum is a no-op and only a
@@ -493,5 +525,19 @@ func TestReminderText(t *testing.T) {
 	// 0 disables entirely, even for a huge store.
 	if got := ReminderText(Footprint{TotalBytes: 1 << 40, DBCount: 99}, 0); got != "" {
 		t.Errorf("gc_reminder_mb=0 must disable the reminder, got %q", got)
+	}
+}
+
+func TestProbeHandlesURISyntaxInPath(t *testing.T) {
+	// `#` and `%` are URI syntax; an unescaped file: URI would misread the path
+	// and report a healthy DB as unreadable.
+	for _, name := range []string{"a#b", "100%", "a%20b"} {
+		dir := filepath.Join(t.TempDir(), name)
+		os.MkdirAll(dir, 0o755)
+		file := mkDB(t, dir, "p", "/some/project")
+		p := probeDB(file)
+		if !p.readable || p.items != 1 || p.projectPath != "/some/project" {
+			t.Errorf("%s: probe = %+v, want readable with 1 item", name, p)
+		}
 	}
 }

@@ -439,9 +439,7 @@ func TestStatsExcludesNotesFromSavings(t *testing.T) {
 	r := Stats(d, projectKey, StatsArgs{})
 	hasT(t, r, "Intercepted items: 1")
 	hasT(t, r, "Notes/memory:      1 item")
-	if strings.Contains(r, "0.0% reduction") {
-		t.Errorf("note bytes diluted the compression ratio:\n%s", r)
-	}
+	hasT(t, r, "99.0% reduction")
 }
 
 // A store holding only notes still reports, rather than claiming no data.
@@ -521,6 +519,16 @@ func TestPin(t *testing.T) {
 	f := false
 	hasT(t, Pin(d, projectKey, PinArgs{ID: s.ID, Pinned: &f}), "unpinned")
 	hasT(t, Pin(d, projectKey, PinArgs{ID: "recall_00000000"}), "no item found")
+}
+
+// A DB failure must surface as an error, not masquerade as an over-budget pin.
+func TestPinSurfacesDBError(t *testing.T) {
+	d := setup(t)
+	s := store(t, d, baseInput())
+	d.Close()
+	r := Pin(d, projectKey, PinArgs{ID: s.ID})
+	hasT(t, r, "[recall: error]")
+	hasNotT(t, r, "max_pinned_mb")
 }
 
 // ── toolNote ──────────────────────────────────────────────────────────────────

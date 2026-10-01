@@ -179,3 +179,25 @@ func TestImportCLIValidation(t *testing.T) {
 		t.Errorf("empty export should be graceful: code=%d out=%q", code, out)
 	}
 }
+
+// Upstream's schema bounds full_retained to 0|1; any other integer would be
+// stored as-is and read as "retained" by every != 0 check.
+func TestValidateFullRetainedRange(t *testing.T) {
+	for _, v := range []int{-1, 2} {
+		r := mkRow("recall_a", "Bash", "[s]", "")
+		r.FullRetained = &v
+		if issues := r.validate(0); len(issues) != 1 || !strings.Contains(issues[0], "full_retained") {
+			t.Errorf("full_retained=%d: issues = %v", v, issues)
+		}
+	}
+	for _, v := range []int{0, 1} {
+		r := mkRow("recall_a", "Bash", "[s]", "")
+		r.FullRetained = &v
+		if issues := r.validate(0); len(issues) != 0 {
+			t.Errorf("full_retained=%d should be valid: %v", v, issues)
+		}
+	}
+	if issues := mkRow("recall_a", "Bash", "[s]", "").validate(0); len(issues) != 0 {
+		t.Errorf("missing full_retained should be valid: %v", issues)
+	}
+}
