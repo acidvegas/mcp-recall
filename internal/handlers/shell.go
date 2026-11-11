@@ -60,24 +60,47 @@ func trimTrailingEmpty(lines []string) []string {
 	return lines[:end]
 }
 
-func formatLines(text string, max int) (header, body string) {
+// formatLines keeps the first max lines after collapsing repeats (upstream
+// #340), so the budget goes to distinct lines, each clipped to MaxLineChars
+// (#349), then any error/warn lines when surfaceFailures (#358) and rtk
+// recovery hints (#353) from the lines cut. The header and the overflow count
+// input lines, not summary lines.
+func formatLines(text string, max int, surfaceFailures bool) (header, body string) {
 	lines := trimTrailingEmpty(strings.Split(text, "\n"))
 	total := len(lines)
-	truncated := total > max
-	n := total
-	if n > max {
-		n = max
+	shown := collapseRepeats(lines, max, MaxLineChars)
+	hidden := total
+	texts := make([]string, len(shown))
+	for i, l := range shown {
+		hidden -= l.count
+		texts[i] = l.text
 	}
-	head := strings.Join(lines[:n], "\n")
+	head := strings.Join(texts, "\n")
 	overflow := ""
-	if truncated {
-		overflow = fmt.Sprintf("\n… (+%d more lines)", total-max)
+	if hidden > 0 {
+		overflow = fmt.Sprintf("\n… (+%d more lines)", hidden)
+	}
+	// Collapsed like the head, so a repeated error costs one line of the cap.
+	cut := collapsedTexts(lines[total-hidden:])
+	var failures []string
+	if surfaceFailures {
+		failures = failureLines(cut)
+	}
+	var rest []string
+	for _, l := range cut {
+		if !containsLine(failures, l) {
+			rest = append(rest, l)
+		}
+	}
+	var extra strings.Builder
+	for _, h := range append(failures, recoveryHints(rest)...) {
+		extra.WriteString("\n" + clipLine(h, MaxLineChars))
 	}
 	plural := "s"
 	if total == 1 {
 		plural = ""
 	}
-	return fmt.Sprintf("%d line%s", total, plural), head + overflow
+	return fmt.Sprintf("%d line%s", total, plural), head + overflow + extra.String()
 }
 
 // parseStructured parses a {stdout, stderr, output, returncode, exit_code}
@@ -108,10 +131,23 @@ func startsWithBraceOrBracket(s string) bool {
 // shellHandler strips ANSI/SSH noise and caps stdout/stderr line counts. Handles
 // structured {stdout, stderr, returncode} JSON as well as plain string output.
 func shellHandler(toolName string, output any) Result {
+	return summarizeShell(toolName, output, true)
+}
+
+// contentReadHandler is the shell summary without failure lines, for a content
+// read with no dedicated handler (`cat`, `sed -n`, `head`). It shows a file,
+// not a run, so an `error` line in it is source or prose, and balanced
+// retention keeps the body (upstream #332, #358).
+func contentReadHandler(toolName string, output any) Result {
+	return summarizeShell(toolName, output, false)
+}
+
+func summarizeShell(toolName string, output any, surfaceFailures bool) Result {
 	raw := ExtractText(output)
+	structured := parseStructured(raw)
 	originalSize := byteLen(raw)
 
-	if structured := parseStructured(raw); structured != nil {
+	if structured != nil {
 		// stdout ?? output ?? "" — non-null stdout wins, else non-null output.
 		var soStr string
 		if v, ok := structured.Get("stdout"); ok && v != nil {
@@ -119,8 +155,10 @@ func shellHandler(toolName string, output any) Result {
 		} else if v, ok := structured.Get("output"); ok && v != nil {
 			soStr, _ = v.(string)
 		}
-		stdout := stripSshNoise(stripAnsi(soStr))
 		stderrStr, _ := objStr(structured, "stderr")
+		// Size the output itself, not the JSON envelope around it (upstream #306).
+		originalSize = byteLen(joinNonEmpty(soStr, stderrStr))
+		stdout := stripSshNoise(stripAnsi(soStr))
 		stderr := stripSshNoise(stripAnsi(stderrStr))
 
 		var exitStr string
@@ -137,12 +175,12 @@ func shellHandler(toolName string, output any) Result {
 			}
 		}
 
-		stdoutHeader, stdoutBody := formatLines(stdout, headStdout)
+		stdoutHeader, stdoutBody := formatLines(stdout, headStdout, surfaceFailures)
 		hasStderr := strings.TrimSpace(stderr) != ""
 		stderrDesc := ""
 		var stderrHeader, stderrBody string
 		if hasStderr {
-			stderrHeader, stderrBody = formatLines(stderr, headStderr)
+			stderrHeader, stderrBody = formatLines(stderr, headStderr, surfaceFailures)
 			stderrDesc = " · " + stderrHeader + " stderr"
 		}
 		header := fmt.Sprintf("[bash · %s%s stdout%s]", exitStr, stdoutHeader, stderrDesc)
@@ -166,6 +204,6 @@ func shellHandler(toolName string, output any) Result {
 		}
 	}
 
-	header, body := formatLines(text, headStdout)
+	header, body := formatLines(text, headStdout, surfaceFailures)
 	return Result{Summary: fmt.Sprintf("[bash · %s]\n%s", header, body), OriginalSize: originalSize}
 }

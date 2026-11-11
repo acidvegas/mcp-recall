@@ -271,18 +271,21 @@ func Search(database *sql.DB, projectKey string, args SearchArgs) string {
 		}
 		summaryLine := fmt.Sprintf("%d. %s · %s · %s\n   %s%s", i+1, item.ID, item.ToolName, formatDate(item.CreatedAt), excerpt, ellipsis)
 
-		snippet := db.RetrieveSnippet(database, item.ID, args.Query)
-		if snippet == "" {
+		// The excerpt is placed on the match, so the agent sees it without a
+		// second call (upstream #405).
+		match := db.RetrieveMatchWindow(database, item.ID, args.Query, snippetMax)
+		if match == nil {
 			lines = append(lines, summaryLine)
 			continue
 		}
-		snipText := strings.TrimSpace(oneline(snippet))
-		capped := firstChars(snipText, snippetMax)
-		trailing := ""
-		if runeLen(snipText) > snippetMax {
-			trailing = "…"
+		lead, trail := "", ""
+		if match.CutStart {
+			lead = "…"
 		}
-		lines = append(lines, fmt.Sprintf("%s\n   > …%s%s", summaryLine, capped, trailing))
+		if match.CutEnd {
+			trail = "…"
+		}
+		lines = append(lines, fmt.Sprintf("%s\n   > %s%s%s", summaryLine, lead, strings.TrimSpace(oneline(match.Text)), trail))
 	}
 
 	return fmt.Sprintf("Found %d result%s for \"%s\":\n\n%s", len(items), plural(len(items)), args.Query, strings.Join(lines, "\n\n"))
@@ -403,6 +406,16 @@ func storedToObj(s db.StoredOutput) *jsonx.Obj {
 		o.Set("command_fp", *s.CommandFP)
 	} else {
 		o.Set("command_fp", nil)
+	}
+	if s.DeliveredSize != nil {
+		o.Set("delivered_size", float64(*s.DeliveredSize))
+	} else {
+		o.Set("delivered_size", nil)
+	}
+	if s.Handler != nil {
+		o.Set("handler", *s.Handler)
+	} else {
+		o.Set("handler", nil)
 	}
 	return o
 }
@@ -548,6 +561,39 @@ func ListStored(database *sql.DB, projectKey string, args ListStoredArgs) string
 
 // ── recall__context ───────────────────────────────────────────────────────────
 
+// overflowSessions is how many sessions a sample's overflow line names.
+const overflowSessions = 3
+
+// formatSampleCount is a sample's count for a section heading: "7", or
+// "10 of 4,522" when rows were left out.
+func formatSampleCount(sample db.SessionSample) string {
+	if len(sample.Overflow) > 0 {
+		return fmt.Sprintf("%d of %s", len(sample.Items), groupInt(sample.Total))
+	}
+	return strconv.Itoa(len(sample.Items))
+}
+
+// formatSampleOverflow is one line naming where a sample's left-out rows live,
+// largest session first.
+func formatSampleOverflow(overflow []db.SessionOverflow) string {
+	var named []string
+	for i, o := range overflow {
+		if i == overflowSessions {
+			break
+		}
+		named = append(named, fmt.Sprintf("+%s more from %s", groupInt(o.Count), o.SessionID))
+	}
+	if rest := overflow[min(len(overflow), overflowSessions):]; len(rest) > 0 {
+		restCount := 0
+		for _, o := range rest {
+			restCount += o.Count
+		}
+		named = append(named, fmt.Sprintf("+%s more from %d other sessions", groupInt(restCount), len(rest)))
+	}
+	return "  " + strings.Join(named, " · ") + "\n" +
+		"    (recall__list_stored to browse; recall__forget session_id clears a session, force: true for pinned)"
+}
+
 type ContextArgs struct {
 	Days  int
 	Limit int
@@ -557,7 +603,7 @@ func Context(database *sql.DB, projectKey string, args ContextArgs) string {
 	data := db.GetContext(database, projectKey, args.Days, args.Limit)
 	today := time.Now().UTC().Format("2006-01-02")
 
-	isEmpty := len(data.Pinned) == 0 && len(data.Notes) == 0 && len(data.Recent) == 0 &&
+	isEmpty := len(data.Pinned.Items) == 0 && len(data.Notes) == 0 && len(data.Recent) == 0 &&
 		len(data.Hot) == 0 && data.LastSession == nil
 	if isEmpty {
 		return ContextEmptyResponse
@@ -569,9 +615,9 @@ func Context(database *sql.DB, projectKey string, args ContextArgs) string {
 		"Generated " + format.RelativeTime(0),
 	}
 
-	if len(data.Pinned) > 0 {
-		lines = append(lines, "", fmt.Sprintf("Pinned (%d):", len(data.Pinned)))
-		for _, item := range data.Pinned {
+	if len(data.Pinned.Items) > 0 {
+		lines = append(lines, "", fmt.Sprintf("Pinned (%s):", formatSampleCount(data.Pinned)))
+		for _, item := range data.Pinned.Items {
 			excerpt := oneline(firstChars(item.Summary, contextExcerptLen))
 			ellipsis := ""
 			if runeLen(item.Summary) > contextExcerptLen {
@@ -579,6 +625,9 @@ func Context(database *sql.DB, projectKey string, args ContextArgs) string {
 			}
 			lines = append(lines, fmt.Sprintf("  📌 %s  %s  %s", item.ID, padEnd(item.ToolName, listToolColWidth), formatDate(item.CreatedAt)))
 			lines = append(lines, "    "+excerpt+ellipsis)
+		}
+		if len(data.Pinned.Overflow) > 0 {
+			lines = append(lines, formatSampleOverflow(data.Pinned.Overflow))
 		}
 	}
 
@@ -690,9 +739,9 @@ func SessionSummary(database *sql.DB, projectKey string, args SessionSummaryArgs
 		}
 	}
 
-	if len(data.Pinned) > 0 {
-		lines = append(lines, "", fmt.Sprintf("Pinned: %d", len(data.Pinned)))
-		for _, item := range data.Pinned {
+	if len(data.Pinned.Items) > 0 {
+		lines = append(lines, "", "Pinned: "+formatSampleCount(data.Pinned))
+		for _, item := range data.Pinned.Items {
 			excerpt := oneline(firstChars(item.Summary, contextExcerptLen))
 			ellipsis := ""
 			if runeLen(item.Summary) > contextExcerptLen {
@@ -701,17 +750,23 @@ func SessionSummary(database *sql.DB, projectKey string, args SessionSummaryArgs
 			lines = append(lines, fmt.Sprintf("  📌 %s  %s", item.ID, item.ToolName))
 			lines = append(lines, "    "+excerpt+ellipsis)
 		}
+		if len(data.Pinned.Overflow) > 0 {
+			lines = append(lines, formatSampleOverflow(data.Pinned.Overflow))
+		}
 	}
 
-	if len(data.Notes) > 0 {
-		lines = append(lines, "", fmt.Sprintf("Notes: %d", len(data.Notes)))
-		for _, note := range data.Notes {
+	if len(data.Notes.Items) > 0 {
+		lines = append(lines, "", "Notes: "+formatSampleCount(data.Notes))
+		for _, note := range data.Notes.Items {
 			excerpt := oneline(firstChars(note.Summary, 100))
 			ellipsis := ""
 			if runeLen(note.Summary) > 100 {
 				ellipsis = "…"
 			}
 			lines = append(lines, fmt.Sprintf("  %s — %s%s", note.ID, excerpt, ellipsis))
+		}
+		if len(data.Notes.Overflow) > 0 {
+			lines = append(lines, formatSampleOverflow(data.Notes.Overflow))
 		}
 	}
 
@@ -838,6 +893,45 @@ func Stats(database *sql.DB, projectKey string, args StatsArgs) string {
 			lines = append(lines, fmt.Sprintf("  %s  %s item%s  %s → %s  %s",
 				padEnd(row.CommandFP, colW), padStart(strconv.Itoa(row.Items), 4), itemWord,
 				padStart(format.Bytes(row.OriginalBytes), 8), padEnd(format.Bytes(row.SummaryBytes), 8), padStart(reduction, 4)))
+		}
+	}
+
+	// Per-handler retrieval rate (upstream #341): a handler whose summaries are
+	// often retrieved is dropping something Claude needed. Rows stored before
+	// handlers were recorded are counted, never attributed.
+	handlerBreakdown := db.GetHandlerBreakdown(database, projectKey, db.HandlerQueryOptions{})
+	if len(handlerBreakdown) > 0 {
+		lines = append(lines, "", "By handler (sorted by original size):")
+		colW := 0
+		for _, r := range handlerBreakdown {
+			if l := runeLen(r.Handler); l > colW {
+				colW = l
+			}
+		}
+		if colW > 40 {
+			colW = 40
+		}
+		for _, row := range handlerBreakdown {
+			reduction := " —"
+			if row.OriginalBytes > 0 {
+				reduction = fmt.Sprintf("%d%%", int(math.Round((1-float64(row.SummaryBytes)/float64(row.OriginalBytes))*100)))
+			}
+			itemWord := "s"
+			if row.Items == 1 {
+				itemWord = " "
+			}
+			retrieved := fmt.Sprintf("%d%% retrieved", int(math.Round(float64(row.Retrieved)/float64(row.Items)*100)))
+			lines = append(lines, fmt.Sprintf("  %s  %s item%s  %s → %s  %s  %s",
+				padEnd(row.Handler, colW), padStart(strconv.Itoa(row.Items), 4), itemWord,
+				padStart(format.Bytes(row.OriginalBytes), 8), padEnd(format.Bytes(row.SummaryBytes), 8), padStart(reduction, 4),
+				retrieved))
+		}
+		if unrecorded := db.CountUnrecordedHandler(database, projectKey, db.HandlerQueryOptions{}); unrecorded > 0 {
+			plural := "s"
+			if unrecorded == 1 {
+				plural = ""
+			}
+			lines = append(lines, fmt.Sprintf("  (%d older item%s stored before handlers were recorded are not included)", unrecorded, plural))
 		}
 	}
 

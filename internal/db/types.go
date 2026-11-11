@@ -25,6 +25,12 @@ type StoredOutput struct {
 	// CommandFP is the privacy-safe command family fingerprint (Bash rows only;
 	// nil otherwise or pre-migration). See upstream #251.
 	CommandFP *string
+	// DeliveredSize is the bytes Claude received: header, newline, summary
+	// (upstream #319). nil for notes and pre-migration rows.
+	DeliveredSize *int64
+	// Handler names the handler that produced the summary (upstream #341). nil
+	// for notes and rows stored before handlers were recorded.
+	Handler *string
 }
 
 // StoreInput is the input required to persist a new compressed tool output.
@@ -47,6 +53,12 @@ type StoreInput struct {
 	// CommandFP is the privacy-safe command family fingerprint (Bash only); nil
 	// stores NULL.
 	CommandFP *string
+	// DeliveredSize is the bytes Claude received for this output (upstream
+	// #319); nil stores NULL.
+	DeliveredSize *int64
+	// Handler names the handler that produced the summary, for `discover`
+	// (upstream #341); nil stores NULL.
+	Handler *string
 }
 
 // SearchOptions configures full-text search across stored outputs.
@@ -109,6 +121,33 @@ type CommandBreakdownRow struct {
 	SummaryBytes  int
 }
 
+// HandlerBreakdownRow is a per-handler row from GetHandlerBreakdown (upstream
+// #341).
+type HandlerBreakdownRow struct {
+	Handler       string
+	Items         int
+	OriginalBytes int
+	SummaryBytes  int
+	// Retrieved counts rows fetched at least once with recall__retrieve.
+	Retrieved int
+}
+
+// FallbackRouteRow is a tool or Bash command family routed to a fallback
+// handler, from GetFallbackRoutes (upstream #341).
+type FallbackRouteRow struct {
+	ToolName string
+	// CommandFP is the Bash command family ("unknown" when untagged); nil for
+	// other tools.
+	CommandFP *string
+	HandlerBreakdownRow
+}
+
+// HandlerQueryOptions filters the handler analytics.
+type HandlerQueryOptions struct {
+	// Since, when non-zero, keeps rows created at or after this Unix time.
+	Since int64
+}
+
 // SuggestionsOptions configures GetSuggestions.
 type SuggestionsOptions struct {
 	PinThreshold int // 0 = default (5)
@@ -132,7 +171,7 @@ type LastSession struct {
 
 // ContextData is the session-orientation snapshot in five isolated sections.
 type ContextData struct {
-	Pinned      []StoredOutput
+	Pinned      SessionSample
 	Notes       []StoredOutput
 	Recent      []StoredOutput
 	Hot         []StoredOutput
@@ -159,17 +198,29 @@ type TopAccessed struct {
 	AccessCount int
 }
 
-// PinnedItem is a pinned item reference within a session summary.
-type PinnedItem struct {
-	ID       string
-	ToolName string
-	Summary  string
+// SampledItem is a sampled row: display columns only, no full_content.
+type SampledItem struct {
+	ID           string
+	SessionID    string
+	ToolName     string
+	Summary      string
+	CreatedAt    int64
+	LastAccessed *int64
 }
 
-// NoteItem is a note reference within a session summary.
-type NoteItem struct {
-	ID      string
-	Summary string
+// SessionOverflow counts the rows of one session left out of a sample.
+type SessionOverflow struct {
+	SessionID string
+	Count     int
+}
+
+// SessionSample is a bounded, session-fair sample of a row set that a bulk
+// writer can grow to thousands (upstream #269, #336). Total is the real count;
+// Overflow counts the rows left out of Items per session, largest first.
+type SessionSample struct {
+	Items    []SampledItem
+	Total    int
+	Overflow []SessionOverflow
 }
 
 // SessionSummaryData is the digest returned by GetSessionSummary.
@@ -182,6 +233,6 @@ type SessionSummaryData struct {
 	AccessedCount      int
 	TotalAccesses      int
 	TopAccessed        []TopAccessed
-	Pinned             []PinnedItem
-	Notes              []NoteItem
+	Pinned             SessionSample
+	Notes              SessionSample
 }

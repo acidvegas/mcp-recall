@@ -85,7 +85,9 @@ func largeGithub() string {
 		issues = append(issues, map[string]any{
 			"number": i + 1, "title": "Issue number " + itoa(i+1) + " with a descriptive title",
 			"state": "open", "html_url": "https://github.com/org/repo/issues/" + itoa(i+1),
-			"labels": []any{map[string]any{"name": "bug"}}, "body": strings.Repeat("x", 300),
+			"labels": []any{map[string]any{"name": "bug"}},
+			// Long enough that a summary saves the 25% minimum (upstream #319).
+			"body": strings.Repeat("x", 900),
 		})
 	}
 	b, _ := json.Marshal(issues)
@@ -104,7 +106,9 @@ func itoa(n int) string {
 	return string(b)
 }
 
-func isEmpty(o HookOutput) bool { return o.UpdatedMCPToolOutput == "" && !o.SuppressOutput }
+func isEmpty(o HookOutput) bool {
+	return o.UpdatedMCPToolOutput == "" && !o.SuppressOutput && o.HookSpecificOutput == nil
+}
 
 // ── handleSessionStart ────────────────────────────────────────────────────────
 
@@ -205,11 +209,17 @@ func TestSessionStartTruncatesLarge(t *testing.T) {
 	var pk string
 	currentCWD, pk = hookEnv(t)
 	database, _ := db.Open(os.Getenv("RECALL_DB_PATH"))
-	for i := 0; i < 15; i++ {
-		s, _ := db.StoreOutput(database, db.StoreInput{ProjectKey: pk, SessionID: "sess-inject-002",
+	// Fill the bounded sections to push the formatted snapshot past 2000 chars:
+	// ten pins (one per session, so the per-session cap doesn't thin them) and
+	// ten unpinned notes, ~200 chars each ≈ 4000 chars.
+	for i := 0; i < 10; i++ {
+		s, _ := db.StoreOutput(database, db.StoreInput{ProjectKey: pk, SessionID: "sess-inject-002-" + itoa(i),
 			ToolName: "mcp__github__list_issues", Summary: "pinned item " + itoa(i) + " — " + strings.Repeat("x", 80),
-			FullContent: "full", OriginalSize: 100})
+			FullContent: "full " + itoa(i), OriginalSize: 100})
 		db.PinOutput(database, s.ID, pk, true)
+		db.StoreOutput(database, db.StoreInput{ProjectKey: pk, SessionID: "sess-inject-002",
+			ToolName: "recall__note", Summary: "note " + itoa(i) + " — " + strings.Repeat("y", 80),
+			FullContent: "note body " + itoa(i), OriginalSize: 100})
 	}
 	database.Close()
 	snap := HandleSessionStart(sessionStart(nil))
@@ -438,7 +448,8 @@ func firstLine(s string) string {
 }
 
 // Default retention is balanced: reproducible Bash is stored summary-only while
-// a network fetch keeps its body.
+// a network fetch keeps its body. (A `cat` is a content read and keeps its body
+// since upstream #332, so the reproducible case is a script.)
 func TestPostRetentionWiring(t *testing.T) {
 	var lines []string
 	for i := 0; i < 300; i++ {
@@ -448,7 +459,7 @@ func TestPostRetentionWiring(t *testing.T) {
 	for _, tc := range []struct {
 		command  string
 		retained int
-	}{{"cat big.txt", 0}, {"curl https://example.com/data", 1}} {
+	}{{"./scripts/build.sh", 0}, {"curl https://example.com/data", 1}} {
 		currentCWD, _ = hookEnv(t)
 		payload := map[string]any{
 			"session_id": sessionID, "cwd": currentCWD, "tool_name": "Bash",
@@ -478,7 +489,8 @@ func TestPostRetentionWiring(t *testing.T) {
 // only the bare subcommand is kept, never the argument.
 func TestPostStoresCommandFingerprint(t *testing.T) {
 	currentCWD, _ = hookEnv(t)
-	bigDiff := "diff --git a/f b/f\n" + strings.Repeat("+added line\n", 400)
+	// Above the 8 KB content-read floor, or the diff passes through unstored.
+	bigDiff := "diff --git a/f b/f\n" + strings.Repeat("+added line\n", 1000)
 	resp, _ := json.Marshal(map[string]any{"stdout": bigDiff, "stderr": "", "exit_code": 0})
 	payload := map[string]any{
 		"session_id": sessionID, "cwd": currentCWD, "tool_name": "Bash",

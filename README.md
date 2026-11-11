@@ -58,6 +58,8 @@ mcprecall <command> [options]
   uninstall            Remove hooks + MCP server
   status               Show current configuration and health
   server               Run the recall MCP server (stdio)
+  discover             Rank output routed to fallback handlers: where a new
+                       handler would pay (--all, --since YYYY-MM-DD, --limit N)
   profiles <cmd>       Manage compression profiles
   learn                Generate profile suggestions from your installed MCPs
   import <file>        Restore items from a recall__export JSON dump
@@ -131,9 +133,10 @@ stale_item_days              = 3          # age before flagging cleanup candidat
 eviction_half_life_days      = 7          # decay half-life for recency-weighted eviction
 gc_reminder_mb               = 2048       # nudge to run `gc` past this store size (0 disables)
 retention                    = "balanced" # which bodies stay retrievable: "full" | "balanced" | "minimal"
-                                          # balanced keeps MCP/web/API results and network Bash
-                                          # (curl/wget/gh api) and stores reproducible Bash
-                                          # (git/tests/ls/grep) summary-only; notes always keep theirs
+                                          # balanced keeps MCP/web/API results, network Bash
+                                          # (curl/wget/gh api) and content reads (cat, git diff,
+                                          # head/tail, sed -n) and stores other reproducible Bash
+                                          # (git log/tests/ls/grep) summary-only; notes always keep theirs
 
 [retrieve]
 default_max_bytes = 8192                  # default retrieve size cap
@@ -268,15 +271,16 @@ as an offline proxy for Claude's tokenizer (~±10%):
 | read_file (big source) | 121.6 KB | 1.6 KB | 98.7% |
 | Bash: go test ×1200 | 32.8 KB | 690 B | 97.9% |
 | Bash: git status ×500 | 17.0 KB | 855 B | 95.1% |
-| Bash: find ×400 | 19.5 KB | 1.2 KB | 93.8% |
-| Bash: tsc --noEmit (60 errors) | 31.8 KB | 2.2 KB | 93.2% |
-| Bash: rg ×240 (6 files) | 13.9 KB | 1.4 KB | 89.9% |
-| **typical output** | — | — | **98.6%** |
+| Bash: find ×400 | 19.0 KB | 1.2 KB | 93.7% |
+| Bash: tsc --noEmit (60 errors) | 28.5 KB | 2.2 KB | 92.4% |
+| Bash: rg ×240 (6 files) | 13.6 KB | 1.4 KB | 89.7% |
+| **typical output** | — | — | **98.5%** |
 
-Across the corpus, tokens go **713,014 → 9,560 — a 98.7% reduction** (~703,000
+Across the corpus, tokens go **713,014 → 11,432 — a 98.4% reduction** (~701,600
 saved), with **0 round-trip failures** (every stored item is verified
 byte-identical) and the secret-bearing fixture **correctly blocked** from
-storage, at ~10–18 MB/s.
+storage, at ~10–18 MB/s. A FACTS column checks that fixtures' listed facts (an
+error count, the last file, an added line) survive in the summary.
 Byte figures are exact and deterministic; what matters most is the **ratio**,
 which holds regardless of tokenizer. Small/edge fixtures (a 5-byte ping,
 malformed JSON) are reported separately so they don't skew the headline.

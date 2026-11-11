@@ -247,6 +247,27 @@ func TestImportRoundTripsCommandFP(t *testing.T) {
 	}
 }
 
+// delivered_size round-trips through export → import (upstream #319).
+func TestImportRoundTripsDeliveredSize(t *testing.T) {
+	src, _ := db.Open(":memory:")
+	defer src.Close()
+	delivered := int64(140)
+	db.StoreOutput(src, db.StoreInput{ProjectKey: srcProject, SessionID: "s", ToolName: "Bash",
+		Summary: "d", FullContent: "body", OriginalSize: 100, DeliveredSize: &delivered})
+	var rows []importRow
+	if err := json.Unmarshal([]byte(tools.Export(src, srcProject)), &rows); err != nil {
+		t.Fatalf("export is not importable JSON: %v", err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "t.db")
+	if res := importItems(dbPath, rows, false, "k"); res.imported != 1 {
+		t.Fatalf("imported = %d", res.imported)
+	}
+	got := query(t, dbPath, "SELECT delivered_size FROM stored_outputs WHERE tool_name = 'Bash'")
+	if len(got) != 1 || got[0][0] != int64(140) {
+		t.Errorf("delivered_size after import = %v", got)
+	}
+}
+
 // ── secret scan (upstream #273) ─────────────────────────────────────────────
 
 const (
@@ -364,5 +385,43 @@ func TestImportCleanDumpReportsNoWithheld(t *testing.T) {
 	out, _ := runImport(t, []importRow{dumpRow("clean_row", nil)})
 	if strings.Contains(out, "containing secrets") || !strings.Contains(out, "1 imported") {
 		t.Errorf("output:\n%s", out)
+	}
+}
+
+// Upstream #411: rows are validated one at a time and validation stops at the
+// issues it reports, so a large file that is not a dump fails fast.
+func TestDecodeExportStopsAtReportedIssues(t *testing.T) {
+	nums := "[" + strings.TrimSuffix(strings.Repeat("1,", 200000), ",") + "]"
+	items, issues, err := decodeExport(nums)
+	if err != nil || items != nil || len(issues) != maxReportedIssues {
+		t.Fatalf("items=%d issues=%v err=%v", len(items), issues, err)
+	}
+	if !strings.HasPrefix(issues[0], "[0]") || !strings.HasPrefix(issues[4], "[4]") {
+		t.Errorf("issues = %v", issues)
+	}
+}
+
+func TestDecodeExportShapes(t *testing.T) {
+	if _, issues, err := decodeExport(`{"a":1}`); err != nil || len(issues) != 1 || !strings.Contains(issues[0], "expected an array") {
+		t.Errorf("object: issues=%v err=%v", issues, err)
+	}
+	if _, _, err := decodeExport("not json at all"); err == nil {
+		t.Error("malformed JSON accepted")
+	}
+	if _, _, err := decodeExport(`[] trailing`); err == nil {
+		t.Error("trailing data accepted")
+	}
+	if _, _, err := decodeExport(`[{"id":"x"}`); err == nil {
+		t.Error("unterminated array accepted")
+	}
+	// A bad row among good ones is reported with its index.
+	good := `{"id":"recall_a","project_key":"p","session_id":"s","tool_name":"t","summary":"","full_content":"","original_size":1,"summary_size":1,"created_at":1,"pinned":0,"access_count":0,"last_accessed":null,"input_hash":null}`
+	items, issues, err := decodeExport("[" + good + `,{"id":"x","created_at":"soon"}]`)
+	if err != nil || items != nil || len(issues) == 0 || !strings.HasPrefix(issues[0], "[1") {
+		t.Errorf("items=%d issues=%v err=%v", len(items), issues, err)
+	}
+	items, issues, err = decodeExport("[" + good + "," + good + "]")
+	if err != nil || len(issues) != 0 || len(items) != 2 {
+		t.Errorf("valid dump: items=%d issues=%v err=%v", len(items), issues, err)
 	}
 }

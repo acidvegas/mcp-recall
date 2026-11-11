@@ -6,6 +6,7 @@ package handlers
 import (
 	"fmt"
 	"math"
+	"reflect"
 	"regexp"
 	"strings"
 )
@@ -25,7 +26,7 @@ var (
 
 func terraformPlanHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
 	summaryLine := terraformPlanSummaryRe.FindString(stdout)
 
@@ -74,7 +75,7 @@ func packageInstallHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
 	stderr := extractStderr(output)
 	combined := strings.TrimSpace(stdout + "\n" + stderr)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
 	var warnings, errors []string
 	for _, line := range strings.Split(combined, "\n") {
@@ -164,7 +165,7 @@ func buildToolHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
 	stderr := extractStderr(output)
 	combined := strings.TrimSpace(stdout + "\n" + stderr)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
 	var errorLines, targetLines []string
 	for _, line := range strings.Split(combined, "\n") {
@@ -189,6 +190,34 @@ func buildToolHandler(toolName string, output any) Result {
 		if compilerErrRe.MatchString(t) || errorBracket.MatchString(t) || caretOnlyRe.MatchString(t) {
 			errorLines = append(errorLines, firstChars(t, 120))
 		}
+	}
+
+	// A recipe that runs tests (`just test`, `make check`) is summarised as a
+	// test run, since the recipe error alone names no failing test (upstream
+	// #325). Errors the test summary does not already show stay below it: a
+	// later step can fail after the tests pass.
+	if tests, ok := summarizeTestRun(output); ok {
+		var extra []string
+		for _, e := range errorLines {
+			if !strings.Contains(tests.Summary, e) {
+				extra = append(extra, e)
+			}
+		}
+		if len(extra) == 0 {
+			return tests
+		}
+		lines := []string{tests.Summary, fmt.Sprintf("  build errors (%d):", len(extra))}
+		n := len(extra)
+		if n > maxBuildErrors {
+			n = maxBuildErrors
+		}
+		for _, e := range extra[:n] {
+			lines = append(lines, "    "+e)
+		}
+		if len(extra) > maxBuildErrors {
+			lines = append(lines, fmt.Sprintf("    … (+%d more)", len(extra)-maxBuildErrors))
+		}
+		return Result{Summary: strings.Join(lines, "\n"), OriginalSize: originalSize}
 	}
 
 	if len(errorLines) == 0 && len(targetLines) == 0 {
@@ -241,7 +270,7 @@ var (
 
 func ghHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
 	var lines []string
 	for _, l := range strings.Split(strings.TrimSpace(stdout), "\n") {
@@ -382,30 +411,294 @@ var (
 	gitGlobalOpts = regexp.MustCompile(`^git\s+(?:(?:--no-pager|--paginate|-P)\s+|-[cC]\s+\S+\s+)+`)
 )
 
+// assignPat is a `VAR=value` assignment. The value alternatives are disjoint (a
+// quoted span, or a run with no whitespace or quote), as in cdPrefixRe.
+const assignPat = `[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|[^\s"']*)`
+
+// wrapperPrefixes are leading wrappers that run another command unchanged
+// (upstream #302). Each is stripped only in a shape whose argument span is
+// unambiguous. Upstream ends each with a lookahead for the start of a command
+// word; RE2 has none, so each pattern consumes that one ASCII character
+// ([A-Za-z_./~]) and the caller keeps it. A flag, operator or end-of-string
+// there means the wrapper is not wrapping anything parseable (`env | grep`,
+// `sudo -u www …`, `timeout 30`), so it is left in place.
+var wrapperPrefixes = []*regexp.Regexp{
+	regexp.MustCompile(`^timeout\s+(?:(?:-[sk]\s+\S+|--[a-z-]+(?:=\S+)?|-v)\s+)*\d+(?:\.\d+)?[smhd]?\s+[A-Za-z_./~]`),
+	regexp.MustCompile(`^time(?:\s+-p)?\s+[A-Za-z_./~]`),
+	regexp.MustCompile(`^nice(?:\s+(?:-n\s*-?\d+|--adjustment=-?\d+|-\d+))?\s+[A-Za-z_./~]`),
+	regexp.MustCompile(`^env(?:\s+-i)?(?:\s+` + assignPat + `)*\s+[A-Za-z_./~]`),
+	regexp.MustCompile(`^(?:` + assignPat + `\s+)+[A-Za-z_./~]`),
+	regexp.MustCompile(`^(?:sudo|doas)\s+[A-Za-z_./~]`),
+}
+
+// quotedCommand returns the command a quoted or bare argument runs, as a
+// shell would pass it on: one single-quoted span, one double-quoted span (a
+// backslash before a double quote, backslash, backtick or $ unescaped), or
+// the bare words as they are. A quoted span may be followed by a local
+// pipeline or separator (`'cmd' | head`), which runs on this side but reads
+// the same output, so it is kept. Anything else after the quote (an escaped
+// quote, or 'a' b) is ambiguous: false.
+func quotedCommand(arg string) (string, bool) {
+	s := strings.TrimSpace(arg)
+	var body, rest string
+	switch {
+	case strings.HasPrefix(s, "'"):
+		end := strings.IndexByte(s[1:], '\'')
+		if end < 0 {
+			return "", false
+		}
+		body, rest = s[1:1+end], s[2+end:]
+	case strings.HasPrefix(s, `"`):
+		m := doubleQuotedRe.FindStringSubmatch(s)
+		if m == nil {
+			return "", false
+		}
+		body = dqEscapeRe.ReplaceAllString(m[1], "$1")
+		rest = s[len(m[0]):]
+	default:
+		return s, true
+	}
+	if strings.TrimSpace(rest) == "" {
+		return strings.TrimSpace(body), true
+	}
+	if localOpRe.MatchString(rest) {
+		return strings.TrimSpace(body) + " " + strings.TrimSpace(rest), true
+	}
+	return "", false
+}
+
+var (
+	doubleQuotedRe = regexp.MustCompile(`^"((?:[^"\\]|\\[\s\S])*)"`)
+	dqEscapeRe     = regexp.MustCompile("\\\\([\"\\\\`$])")
+	localOpRe      = regexp.MustCompile(`^\s*[|;&<>]`)
+	optionWordRe   = regexp.MustCompile(`^(-[^\s'"]*)(?:\s+|$)`)
+	optionValueRe  = regexp.MustCompile(`^[^\s'"]+(?:\s+|$)`)
+	// targetRe is a host, container or `user@host`: no leading dash, quote or
+	// operator.
+	targetRe = regexp.MustCompile(`^[A-Za-z0-9_][\w.@:-]*\s+`)
+)
+
+// skipOptions splits `-xyz` option clusters off the front of args. withValue
+// lists the single-letter options that take a value (attached, `-p22`, or as
+// the next word), flags those that take none, long the long options (`--name`
+// or `--name=value`; true when they take a value). Returns what follows the
+// options, or false on any option outside those lists or a quoted value.
+func skipOptions(args, withValue, flags string, long map[string]bool) (string, bool) {
+	rest := args
+	for i := 0; i < 16; i++ {
+		opt := optionWordRe.FindStringSubmatch(rest)
+		if opt == nil {
+			return rest, true
+		}
+		rest = rest[len(opt[0]):]
+		word := opt[1]
+		if word == "--" {
+			return rest, true
+		}
+		needsValue := false
+		if strings.HasPrefix(word, "--") {
+			name, _, hasInline := strings.Cut(word[2:], "=")
+			takesValue, known := long[name]
+			if !known {
+				return "", false
+			}
+			needsValue = takesValue && !hasInline
+		} else {
+			for j := 1; j < len(word); j++ {
+				ch := word[j]
+				if strings.IndexByte(withValue, ch) >= 0 {
+					needsValue = j == len(word)-1 // otherwise the value is attached
+					break
+				}
+				if strings.IndexByte(flags, ch) < 0 {
+					return "", false
+				}
+			}
+		}
+		if needsValue {
+			value := optionValueRe.FindString(rest)
+			if value == "" {
+				return "", false
+			}
+			rest = rest[len(value):]
+		}
+	}
+	return "", false
+}
+
+// ssh(1) single-letter options. -N (no remote command) is in neither list, so
+// a tunnel is never unwrapped.
+const (
+	sshWithValue        = "BbcDEeFIiJLlmOoPpQRSWw"
+	sshFlags            = "46AaCfGgKkMnqsTtVvXxYy"
+	dockerExecWithValue = "euw"
+	dockerExecFlags     = "dit"
+)
+
+var dockerExecLong = map[string]bool{
+	"detach": false, "interactive": false, "tty": false, "privileged": false,
+	"env": true, "env-file": true, "user": true, "workdir": true, "detach-keys": true,
+}
+
+var (
+	rtkPrefixRe  = regexp.MustCompile(`^rtk\s+(?:(?:-v+|--verbose|--skip-env)\s+)*`)
+	rtkOwnReadRe = regexp.MustCompile(`^(read|recall)(\s|$)`)
+	sshPrefixRe  = regexp.MustCompile(`^ssh\s+`)
+	pctExecRe    = regexp.MustCompile(`^pct\s+exec\s+\d+\s+(?:--\s+)?`)
+	dockerExecRe = regexp.MustCompile(`^docker\s+exec\s+`)
+	// Upstream ends with a lookahead for the opening quote; RE2 has none, so
+	// the quote is matched and left in place by the caller.
+	shellDashCRe = regexp.MustCompile(`^(?:ba)?sh\s+-[elx]*c[elx]*\s+['"]`)
+)
+
+// remoteWrapper is a command that runs another command elsewhere (upstream
+// #339): `ssh host cmd`, `pct exec <id> -- cmd`, `docker exec ctr cmd`, and
+// `bash -c 'cmd'`; or through rtk's proxy, `rtk git diff` (#353). unwrap
+// returns the command run, or false when the shape is not unambiguous. label
+// names the wrapper in the fingerprint; `bash -c` runs locally and has none.
+type remoteWrapper struct {
+	label  string
+	unwrap func(c string) (string, bool)
+}
+
+// optionTarget unwraps `<verb> [options] <target> <command>` for ssh and
+// docker exec.
+func optionTarget(prefix *regexp.Regexp, withValue, flags string, long map[string]bool) func(string) (string, bool) {
+	return func(c string) (string, bool) {
+		loc := prefix.FindStringIndex(c)
+		if loc == nil {
+			return "", false
+		}
+		args, ok := skipOptions(c[loc[1]:], withValue, flags, long)
+		if !ok {
+			return "", false
+		}
+		target := targetRe.FindString(args)
+		if target == "" {
+			return "", false
+		}
+		return quotedCommand(args[len(target):])
+	}
+}
+
+var remoteWrappers = []remoteWrapper{
+	// rtk's own `read` and `recall` run no other command, so they stay as they
+	// are: `rtk read f` fingerprints as `rtk read` and is a content read.
+	{"rtk", func(c string) (string, bool) {
+		loc := rtkPrefixRe.FindStringIndex(c)
+		if loc == nil {
+			return "", false
+		}
+		inner := c[loc[1]:]
+		if rtkOwnReadRe.MatchString(inner) {
+			return "", false
+		}
+		return inner, true
+	}},
+	{"ssh", optionTarget(sshPrefixRe, sshWithValue, sshFlags, nil)},
+	{"pct exec", func(c string) (string, bool) {
+		loc := pctExecRe.FindStringIndex(c)
+		if loc == nil {
+			return "", false
+		}
+		return quotedCommand(c[loc[1]:])
+	}},
+	{"docker exec", optionTarget(dockerExecRe, dockerExecWithValue, dockerExecFlags, dockerExecLong)},
+	{"", func(c string) (string, bool) {
+		loc := shellDashCRe.FindStringIndex(c)
+		if loc == nil {
+			return "", false
+		}
+		return quotedCommand(c[loc[1]-1:]) // keep the opening quote
+	}},
+}
+
+// unwrapCommand is NormalizeCommand, plus the labelled wrappers it stepped
+// through, outermost first.
+func unwrapCommand(command string) (string, []string) {
+	c := strings.TrimSpace(command)
+	var wrappers []string
+	// Bounded: chained prefixes are rare, and a bound keeps a pathological
+	// input from looping. Stops as soon as no prefix matches.
+	for i := 0; i < 8; i++ {
+		if m := cdPrefixRe.FindStringSubmatch(c); m != nil {
+			c = strings.TrimSpace(m[1])
+			continue
+		}
+		stripped := false
+		for _, re := range wrapperPrefixes {
+			if loc := re.FindStringIndex(c); loc != nil {
+				c = c[loc[1]-1:] // keep the command word's first character
+				stripped = true
+				break
+			}
+		}
+		if stripped {
+			continue
+		}
+		unwrapped := false
+		for _, w := range remoteWrappers {
+			if inner, ok := w.unwrap(c); ok && inner != "" {
+				if w.label != "" {
+					wrappers = append(wrappers, w.label)
+				}
+				c = inner
+				unwrapped = true
+				break
+			}
+		}
+		if !unwrapped {
+			break
+		}
+	}
+	return gitGlobalOpts.ReplaceAllString(c, "git "), wrappers
+}
+
 // NormalizeCommand normalises a Bash command so routing sees the real
 // subcommand: it unwraps leading `cd <dir>` prefixes (see cdPrefixRe for the
 // separator and quoting shapes) and strips git global options (--no-pager,
 // -C <path>, -c <k=v>, --paginate, -P) that would otherwise push `git diff`
-// output to the generic shell fallback. Chained prefixes across mixed
-// separators (`cd /a && cd /b\ngit diff`) are unwrapped up to 4 hops, as
+// output to the generic shell fallback.
+//
+// It also strips leading wrappers that run the real command unchanged
+// (`timeout 30`, `time`, `nice -n 10`, `env A=1`, `A=1`, `sudo`; see
+// wrapperPrefixes), so routing, the fingerprint and retention all see the
+// wrapped command (upstream #302).
+//
+// And it unwraps commands run elsewhere (`ssh host 'git status'`, `pct exec
+// 108 -- journalctl`, `docker exec ctr ps`, `bash -c '…'`; see
+// remoteWrappers), so they reach the handler for the command they run (#339).
+// `rtk <cmd>` unwraps the same way for the fingerprint and retention, but not
+// for routing (#353).
+//
+// Chained prefixes are unwrapped across mixed separators and wrappers (`cd /a
+// && timeout 60 git diff`, `ssh h 'cd /x && git diff'`) up to 8 hops, as
 // upstream bounds it.
 func NormalizeCommand(command string) string {
-	c := strings.TrimSpace(command)
-	for i := 0; i < 4; i++ {
-		m := cdPrefixRe.FindStringSubmatch(c)
-		if m == nil {
-			break
-		}
-		c = strings.TrimSpace(m[1])
+	c, _ := unwrapCommand(command)
+	return c
+}
+
+// BashFingerprint is the fingerprint the hook stores for a raw Bash command:
+// CommandFingerprint of the normalised command, prefixed by any wrappers it
+// ran through (`ssh git status`, `pct exec journalctl`, `rtk git diff`), so
+// local, remote and rtk-run stay apart in analytics (upstream #339, #353).
+// Wrapper labels are constants: no host, id or container name.
+func BashFingerprint(command string) string {
+	inner, wrappers := unwrapCommand(command)
+	parts := wrappers
+	if fp := CommandFingerprint(inner); fp != "" {
+		parts = append(parts, fp)
 	}
-	return gitGlobalOpts.ReplaceAllString(c, "git ")
+	return strings.Join(parts, " ")
 }
 
 // subcommandTools are dispatchers whose first token names a tool family, not the
 // operation — the meaningful fingerprint is "verb subcommand" ("git diff").
+// rtk is here for its own commands (`rtk read`), which are not unwrapped.
 var subcommandTools = map[string]bool{
 	"git": true, "cargo": true, "go": true, "npm": true, "pnpm": true,
-	"yarn": true, "bun": true, "docker": true, "kubectl": true,
+	"yarn": true, "bun": true, "docker": true, "kubectl": true, "rtk": true,
 }
 
 // wrapperTools prefix a real command; skipped so the fingerprint names the
@@ -458,6 +751,249 @@ func CommandFingerprint(command string) string {
 	return verb + " " + second[1]
 }
 
+// ReadPassthroughMaxBytes is the size up to which a content read's output is
+// delivered whole (upstream #327, #332).
+const ReadPassthroughMaxBytes = 8 * 1024
+
+// commandSplitRe splits a command on pipes and sequence operators.
+var commandSplitRe = regexp.MustCompile(`\||;|&&|\n`)
+
+// splitTopLevel splits command at every |, ||, ;, &&, & and newline outside
+// quotes, escapes and ( … ), so a quoted remote command (`ssh h 'cat f |
+// head'`) stays one segment until it is unwrapped. Every operator is ASCII,
+// so the scan is byte-wise.
+func splitTopLevel(command string) []string {
+	var parts []string
+	var quote byte
+	depth, start := 0, 0
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+		switch {
+		case quote == '\'':
+			if ch == '\'' {
+				quote = 0
+			}
+		case ch == '\\':
+			i++
+		case quote != 0:
+			if ch == quote {
+				quote = 0
+			}
+		case ch == '\'' || ch == '"' || ch == '`':
+			quote = ch
+		case ch == '(':
+			depth++
+		case ch == ')':
+			if depth > 0 {
+				depth--
+			}
+		case depth == 0 && (ch == '|' || ch == ';' || ch == '&' || ch == '\n'):
+			parts = append(parts, command[start:i])
+			start = i + 1
+		}
+	}
+	parts = append(parts, command[start:])
+	out := parts[:0]
+	for _, p := range parts {
+		if strings.TrimSpace(p) != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// unwrappedSegments returns the quote-aware commands in command, each without
+// its cd/wrapper prefixes. A segment that unwraps to a command line of its own
+// (`ssh h 'cat f | head'`) is split again, a bounded number of times.
+func unwrappedSegments(command string, depth int) []string {
+	var out []string
+	for _, part := range splitTopLevel(command) {
+		c := NormalizeCommand(part)
+		if depth < 3 && len(splitTopLevel(c)) > 1 {
+			out = append(out, unwrappedSegments(c, depth+1)...)
+		} else {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// commandSegments returns the commands in command, each without its
+// cd/wrapper prefixes: the unwrappedSegments, plus a split that ignores
+// quoting. The second finds a read no unwrap reaches (`for h in a b; do ssh
+// $h '… | head'`, a multi-range `sed -n '1,5p;9,12p'`). Missing a read
+// summarizes lines Claude asked for; a false one (`echo "x | head"`) delivers
+// at most ReadPassthroughMaxBytes.
+func commandSegments(command string) []string {
+	parts := commandSplitRe.Split(command, -1)
+	for i, p := range parts {
+		parts[i] = NormalizeCommand(p)
+	}
+	return append(unwrappedSegments(command, 0), parts...)
+}
+
+// sedLine is a sed line address: a number, a shell expansion the shell turns
+// into one (`$n`, `${n}`, `$((n+40))`), or a bare `$` for the last line. A
+// command substitution `$(…)` is not matched: commandSegments splits on its
+// pipes.
+const sedLine = `(?:\d+|\$(?:\w+|\{\w+\}|\(\([^()]*\)\))|\$)`
+
+var (
+	// sedLineRangeRe matches `sed -n` printing one line or a line range (`N,M`,
+	// `N,$`, `N,+M`).
+	sedLineRangeRe = regexp.MustCompile(`^sed\s+(?:-\S+\s+)*-n\s+['"]?` + sedLine + `(?:,\s*\+?` + sedLine + `)?p['"]?(\s|$)`)
+	headTailRe     = regexp.MustCompile(`^(head|tail)(\s|$)`)
+	grepCmdRe      = regexp.MustCompile(`^(grep|egrep|fgrep|rg|ag|git\s+grep)\s`)
+	grepLimitRe    = regexp.MustCompile(`\s(-[a-zA-Z]*[ABCm]\s*\d+|--(?:after-|before-)?context[=\s]\d+|--max-count[=\s]\d+)`)
+	catDiffShowRe  = regexp.MustCompile(`^(cat|git\s+(diff|show))(\s|$)`)
+	logPatchRe     = regexp.MustCompile(`^git\s+(log|stash\s+show)(\s.*)?\s(-p|--patch|-u)(\s|$)`)
+	rtkReadRe      = regexp.MustCompile(`^rtk\s+(?:-\S+\s+)*(read|recall)(\s|$)`)
+)
+
+// IsBoundedRead reports whether any command in command limits its own output:
+// head/tail, a `sed -n` line range, or grep context and match limits (-A/-B/-C
+// N, -m N). That output is what Claude asked for, so a summary would drop
+// requested lines (upstream #327).
+func IsBoundedRead(command string) bool {
+	for _, s := range commandSegments(command) {
+		if headTailRe.MatchString(s) || sedLineRangeRe.MatchString(s) {
+			return true
+		}
+		if grepCmdRe.MatchString(s) && grepLimitRe.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsContentRead reports whether command reads content for Claude: a bounded
+// read, `cat`, `git diff`/`git show`, or a patch from `git log -p`/`git stash
+// show -p`. Their summaries keep stats or a head and tail, which drops what
+// Claude asked for, so the hook delivers small ones whole and balanced
+// retention keeps the body of large ones (upstream #332). rtk's rewrite of a
+// read, `rtk read f`, and `rtk recall <hash>` count too (#353).
+func IsContentRead(command string) bool {
+	if IsBoundedRead(command) {
+		return true
+	}
+	for _, s := range commandSegments(command) {
+		if catDiffShowRe.MatchString(s) || logPatchRe.MatchString(s) || rtkReadRe.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// pipeFilterRe matches commands that only filter the lines piped into them, so
+// a file read stays one.
+var (
+	pipeFilterRe = regexp.MustCompile(`^(grep|egrep|fgrep|rg|head|tail|sed|awk|cut|sort|uniq|wc|tr|nl|column|less|cat)(\s|$)`)
+	catHeredocRe = regexp.MustCompile(`^cat\s+<<`)
+	fileReadRe   = regexp.MustCompile(`^(cat|head|tail)(\s|$)`)
+	rtkFileRe    = regexp.MustCompile(`^rtk\s+(?:-\S+\s+)*read(\s|$)`)
+)
+
+// isFileRead reports whether the output comes from a file rather than a run:
+// the pipeline starts with cat, head, tail, a `sed -n` range or `rtk read`,
+// and only filters follow. `journalctl | head`, `cat q.sql | psql` and `cat
+// <<EOF | ssh h` are runs, so their failure lines still surface (upstream
+// #358).
+func isFileRead(command string) bool {
+	segments := splitTopLevel(command)
+	if len(segments) == 0 {
+		return false
+	}
+	first := NormalizeCommand(segments[0])
+	if catHeredocRe.MatchString(first) {
+		return false
+	}
+	if !fileReadRe.MatchString(first) && !sedLineRangeRe.MatchString(first) && !rtkFileRe.MatchString(first) {
+		return false
+	}
+	for _, s := range segments[1:] {
+		if !pipeFilterRe.MatchString(NormalizeCommand(s)) {
+			return false
+		}
+	}
+	return true
+}
+
+// IsCompoundCommand reports whether command runs more than one command in
+// sequence: a `;`, `&&`, `||` or newline outside quotes, escapes and `( … )` /
+// `$( … )`, with a command after it. A pipe is not a separator: it yields one
+// output stream. Every operator is ASCII, so the scan is byte-wise.
+func IsCompoundCommand(command string) bool {
+	var quote byte
+	depth := 0
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+		if quote == '\'' {
+			if ch == '\'' {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '\\' {
+			i++
+			continue
+		}
+		if quote != 0 {
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch {
+		case ch == '\'' || ch == '"' || ch == '`':
+			quote = ch
+		case ch == '(':
+			depth++
+		case ch == ')':
+			if depth > 0 {
+				depth--
+			}
+		case depth == 0:
+			width := 0
+			if strings.HasPrefix(command[i:], "&&") || strings.HasPrefix(command[i:], "||") {
+				width = 2
+			} else if ch == ';' || ch == '\n' {
+				width = 1
+			}
+			if width > 0 && strings.TrimSpace(command[i+width:]) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Compound-command windows: wide enough that a typical multi-command
+// diagnostic (a few short sections) passes through whole, since every section
+// is a separate answer and any one may be the one needed.
+const (
+	compoundHeadLines = 30
+	compoundTailLines = 15
+)
+
+// compoundHandler summarises several commands' output (upstream #308): no
+// single command's handler fits, and an `ls` handler on `ls …; git diff | wc
+// -c` dropped the second result. Short output is returned whole bar its
+// over-wide lines (upstream #349), so the hook usually passes it through
+// unstored; long output keeps head, tail and the error lines between.
+func compoundHandler(_ string, output any) Result {
+	text := BashOutputText(output)
+	originalSize := byteLen(text)
+	lines := strings.Split(text, "\n")
+	if len(lines) <= compoundHeadLines+compoundTailLines {
+		for i, l := range lines {
+			lines[i] = clipLine(l, MaxLineChars)
+		}
+		return Result{Summary: strings.Join(lines, "\n"), OriginalSize: originalSize}
+	}
+	window := summarizeLineWindow(lines, compoundHeadLines, compoundTailLines)
+	return Result{Summary: fmt.Sprintf("[bash · compound command · %d lines]\n%s", len(lines), window), OriginalSize: originalSize}
+}
+
 // GetBashHandler returns the handler for a native Bash tool call based on the
 // command string in tool_input. Falls back to the shell handler.
 func GetBashHandler(input any) Handler {
@@ -465,7 +1001,21 @@ func GetBashHandler(input any) Handler {
 	if rawCommand == "" {
 		return shellHandler
 	}
-	command := NormalizeCommand(rawCommand)
+	command, wrappers := unwrapCommand(rawCommand)
+	if IsCompoundCommand(command) {
+		return compoundHandler
+	}
+	if isFileRead(command) {
+		return contentReadHandler
+	}
+	// rtk reshapes output (a diff without its headers), so a parser for the
+	// raw command could read it wrong and claim a false count, the #350 class
+	// (upstream #353).
+	for _, w := range wrappers {
+		if w == "rtk" {
+			return shellHandler
+		}
+	}
 	switch {
 	case cmdGitGrep.MatchString(command):
 		return grepHandler
@@ -505,4 +1055,34 @@ func GetBashHandler(input any) Handler {
 		return findHandler
 	}
 	return shellHandler
+}
+
+// readsStderr holds the handlers that read stderr themselves. Test runners,
+// compilers and make report there (`bun test` prints its results on stderr),
+// so empty stdout is normal. Handlers are funcs, which Go cannot compare, so
+// the set is keyed by code pointer.
+var readsStderr = map[uintptr]bool{}
+
+func init() {
+	for _, h := range []Handler{
+		shellHandler, contentReadHandler, compoundHandler, testRunnerHandler, buildToolHandler,
+		compilerDiagnosticsHandler, packageInstallHandler,
+	} {
+		readsStderr[reflect.ValueOf(h).Pointer()] = true
+	}
+}
+
+// keepStderrError returns the shell handler in place of handler when the
+// command's stdout is empty and its stderr is not: it failed, though inside a
+// pipeline it still exits 0. A handler that summarises stdout would report
+// that as "no matches" or "no changes", while the shell handler keeps stderr
+// (upstream #326). New handlers get this by default.
+func keepStderrError(handler Handler, output any) Handler {
+	if readsStderr[reflect.ValueOf(handler).Pointer()] {
+		return handler
+	}
+	if strings.TrimSpace(extractStdout(output)) == "" && strings.TrimSpace(extractStderr(output)) != "" {
+		return shellHandler
+	}
+	return handler
 }

@@ -13,6 +13,7 @@ package importer
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -51,6 +52,12 @@ type importRow struct {
 	// CommandFP is optional for dumps predating per-command attribution
 	// (upstream #251): missing → NULL, reported as "unknown".
 	CommandFP *string `json:"command_fp"`
+	// DeliveredSize is optional for dumps predating upstream #319: missing →
+	// NULL, and savings figures fall back to summary_size for that row.
+	DeliveredSize *int64 `json:"delivered_size"`
+	// Handler is optional for dumps predating upstream #341: missing → NULL,
+	// "stored before handlers were recorded".
+	Handler *string `json:"handler"`
 }
 
 func (r importRow) validate(i int) []string {
@@ -73,10 +80,65 @@ func (r importRow) validate(i int) []string {
 	if r.Pinned < 0 || r.Pinned > 1 {
 		issues = append(issues, fmt.Sprintf("[%d.pinned] must be 0 or 1", i))
 	}
+	if r.DeliveredSize != nil && *r.DeliveredSize < 0 {
+		issues = append(issues, fmt.Sprintf("[%d.delivered_size] must be non-negative", i))
+	}
 	if r.FullRetained != nil && (*r.FullRetained < 0 || *r.FullRetained > 1) {
 		issues = append(issues, fmt.Sprintf("[%d.full_retained] must be 0 or 1", i))
 	}
 	return issues
+}
+
+// maxReportedIssues is how many validation issues import reports before it
+// stops checking.
+const maxReportedIssues = 5
+
+// decodeExport reads a recall__export dump one row at a time and validates
+// each as it goes, stopping once maxReportedIssues issues are found. Decoding
+// the whole array first allocated a row for every element, so a large file
+// that was not a dump could exhaust memory before saying so (upstream #411).
+// err is non-nil only for malformed JSON.
+func decodeExport(raw string) (items []importRow, issues []string, err error) {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, nil, err
+	}
+	if tok != json.Delim('[') {
+		return nil, []string{"[] expected an array of exported rows"}, nil
+	}
+	for i := 0; dec.More(); i++ {
+		var row importRow
+		if err := dec.Decode(&row); err != nil {
+			var typeErr *json.UnmarshalTypeError
+			if !errors.As(err, &typeErr) {
+				return nil, nil, err
+			}
+			field := ""
+			if typeErr.Field != "" {
+				field = "." + typeErr.Field
+			}
+			issues = append(issues, fmt.Sprintf("[%d%s] expected %s, got %s", i, field, typeErr.Type, typeErr.Value))
+		} else if rowIssues := row.validate(i); len(rowIssues) > 0 {
+			issues = append(issues, rowIssues...)
+		} else {
+			items = append(items, row)
+		}
+		if len(issues) >= maxReportedIssues {
+			return nil, issues[:maxReportedIssues], nil
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, nil, err
+	}
+	// Trailing data after the array is malformed, as json.Unmarshal would say.
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, nil, errors.New("invalid character after top-level value")
+	}
+	if len(issues) > 0 {
+		return nil, issues, nil
+	}
+	return items, nil, nil
 }
 
 // toStored stamps the row with projectKey — always the current project's key,
@@ -99,7 +161,8 @@ func (r importRow) toStored(projectKey string) db.StoredOutput {
 		Summary: r.Summary, FullContent: fullContent, OriginalSize: r.OriginalSize,
 		SummarySize: r.SummarySize, CreatedAt: r.CreatedAt, Pinned: r.Pinned,
 		AccessCount: r.AccessCount, LastAccessed: r.LastAccessed, InputHash: r.InputHash,
-		FullRetained: fullRetained, CommandFP: r.CommandFP,
+		FullRetained: fullRetained, CommandFP: r.CommandFP, DeliveredSize: r.DeliveredSize,
+		Handler: r.Handler,
 	}
 }
 
@@ -180,21 +243,14 @@ func HandleImport(args []string) {
 		return
 	}
 
-	var items []importRow
-	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+	items, issues, err := decodeExport(raw)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "Invalid JSON input.")
 		os.Exit(1)
 	}
-	var allIssues []string
-	for i, it := range items {
-		allIssues = append(allIssues, it.validate(i)...)
-	}
-	if len(allIssues) > 0 {
+	if len(issues) > 0 {
 		fmt.Fprintln(os.Stderr, "Input does not look like a recall__export dump:")
-		for i, issue := range allIssues {
-			if i >= 5 {
-				break
-			}
+		for _, issue := range issues {
 			fmt.Fprintf(os.Stderr, "  %s\n", issue)
 		}
 		os.Exit(1)
